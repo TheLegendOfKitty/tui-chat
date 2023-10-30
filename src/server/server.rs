@@ -42,17 +42,17 @@ async fn dispatch(receiver: Receiver<Event>) -> io::Result<()> {
         let output = match event {
             Event::Join(addr, stream) => {
                 client_map.insert(addr, stream);
-                format!("{} has joined\n", addr)
+                format!("{} has joined", addr)
             }
             Event::Leave(addr) => {
                 client_map.remove(&addr);
-                format!("{} has left\n", addr)
+                format!("{} has left", addr)
             }
-            Event::Message(addr, msg) => format!("{} says: {}t", addr, msg)
+            Event::Message(addr, msg) => format!("{} says: {}", addr, msg)
         };
 
         //Display the event in the server process
-        print!("{}", output);
+        println!("{}", output);
 
         //Send the event to all active clients
         for stream in client_map.values_mut() {

@@ -11,7 +11,10 @@ async-channel = "2.0.0"
 async-dup = "1.2.2"
 crossterm = "0.27.0"
 ratatui = "0.24.0"
-#viuer = "0.7.1"
+ratatui-image = "0.3.3"
+tui-textarea = "0.3.0"
+futures-util = "0.3.29"
+viuer = "0.7.1"
 
 [[bin]]
 name = "client"
