@@ -2,7 +2,7 @@
 pub mod common;
 use crate::common::{Event, Packet, MessageType};
 
-use smol::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use smol::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::net::{TcpListener, TcpStream};
 use smol::channel::{Receiver, Sender, bounded};
 use std::error::Error;
@@ -22,21 +22,21 @@ async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
                 map.insert(addr, stream);
                 Packet {
                     message_type: MessageType::STRING,
-                    data: Vec::from(format!("{} has joined", addr)),
+                    data: Vec::from(format!("{} has joined\n", addr)),
                 }
             }
             Event::Leave(addr) => {
                 map.remove(&addr);
                 Packet {
                     message_type: MessageType::STRING,
-                    data: Vec::from(format!("{} has left", addr))
+                    data: Vec::from(format!("{} has left\n", addr))
                 }
             }
             Event::Message(_addr, packet) => {
                 packet
             }
         };
-        println!("{}", String::from_utf8(packet.data.clone()).unwrap());
+        print!("{}", String::from_utf8(packet.data.clone()).unwrap());
         let output = to_allocvec(&packet).unwrap();
 
         for stream in map.values_mut() {
@@ -51,24 +51,26 @@ async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
 async fn read_messages(sender: Sender<Event>, client: Arc<Async<TcpStream>>) -> Result<(), Box<dyn Error>> {
     let addr = client.get_ref().peer_addr().unwrap();
     let mut reader = BufReader::new(client);
-    let mut buf = Vec::new();
+    //let mut buf = Vec::new();
 
     'a : loop {
-        match reader.read_to_end(&mut buf).await {
+        let consumed;
+        match reader.fill_buf().await {
             Ok(bytes_read) => {
-                if bytes_read == 0 { //nothing read
+                if bytes_read.len() == 0 { //nothing read
                     continue 'a;
                 }
                 //todo: client can send bad data and crash server
-                let packet = postcard::from_bytes(buf.as_slice()).unwrap();
+                let packet: Packet = postcard::from_bytes(bytes_read).unwrap();
                 sender.send(Event::Message(addr, packet)).await.ok();
+                consumed = bytes_read.len();
             }
             Err(_) => {
-                //sender.send(Event::Leave(addr)).await.ok();
                 return Ok(())
             }
         }
-        buf = Vec::new();
+        reader.consume(consumed);
+        //buf = Vec::new();
     }
 }
 fn main() -> Result<(), Box<dyn Error>> {
