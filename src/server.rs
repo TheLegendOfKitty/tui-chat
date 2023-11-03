@@ -1,8 +1,10 @@
 //#![feature(let_chains)]
+use std::io::Write;
+#[forbid(unsafe_code)]
 pub mod common;
-use crate::common::{Event, Packet, MessageType};
+use crate::common::{Event, Packet, MessageType, PktSource};
 
-use smol::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use smol::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use std::net::{TcpListener, TcpStream};
 use smol::channel::{Receiver, Sender, bounded};
 use std::error::Error;
@@ -21,22 +23,27 @@ async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
             Event::Join(addr, stream) => {
                 map.insert(addr, stream);
                 Packet {
+                    src: PktSource::SERVER,
                     message_type: MessageType::STRING,
-                    data: Vec::from(format!("{} has joined\n", addr)),
+                    data: Vec::from(format!("{} has joined", addr)),
                 }
             }
             Event::Leave(addr) => {
                 map.remove(&addr);
                 Packet {
+                    src: PktSource::SERVER,
                     message_type: MessageType::STRING,
-                    data: Vec::from(format!("{} has left\n", addr))
+                    data: Vec::from(format!("{} has left", addr))
                 }
             }
-            Event::Message(_addr, packet) => {
+            Event::Message(addr, mut packet) => {
+                //clients should not be able to spoof the source
+                packet.src = PktSource::CLIENT(addr);
                 packet
             }
         };
-        print!("{}", String::from_utf8(packet.data.clone()).unwrap());
+        println!("{}", String::from_utf8(packet.data.clone()).unwrap());
+        //stdout().flush().unwrap();
         let output = to_allocvec(&packet).unwrap();
 
         for stream in map.values_mut() {
@@ -51,13 +58,20 @@ async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
 async fn read_messages(sender: Sender<Event>, client: Arc<Async<TcpStream>>) -> Result<(), Box<dyn Error>> {
     let addr = client.get_ref().peer_addr().unwrap();
     let mut reader = BufReader::new(client);
-    //let mut buf = Vec::new();
 
     'a : loop {
         let consumed;
         match reader.fill_buf().await {
             Ok(bytes_read) => {
-                if bytes_read.len() == 0 { //nothing read
+                if bytes_read.len() == 0 {
+                    //nothing read... is the client even connected?
+                    match reader.read(&mut [0u8; 0]).await {
+                        Ok(0) => {
+                            // The client is disconnected
+                            return Ok(())
+                        }
+                        _ => {}
+                    }
                     continue 'a;
                 }
                 //todo: client can send bad data and crash server
@@ -65,12 +79,11 @@ async fn read_messages(sender: Sender<Event>, client: Arc<Async<TcpStream>>) -> 
                 sender.send(Event::Message(addr, packet)).await.ok();
                 consumed = bytes_read.len();
             }
-            Err(_) => {
+            Err(_) => { //todo: when is this branch taken?
                 return Ok(())
             }
         }
         reader.consume(consumed);
-        //buf = Vec::new();
     }
 }
 fn main() -> Result<(), Box<dyn Error>> {
