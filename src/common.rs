@@ -11,13 +11,23 @@ pub enum Event {
 }
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub enum MessageType {
     STRING,
     IMAGE
 }
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Clone)]
+pub enum PktSource {
+    CLIENT(SocketAddr), //set by server when messages are dispatched
+    SERVER, //server messages, such as join/leave
+    UNDEFINED //client should set source as undefined
+}
+
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
 pub struct Packet {
+    pub src: PktSource,
     pub message_type: MessageType,
     pub data: Vec<u8>
 }
