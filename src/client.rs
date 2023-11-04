@@ -10,7 +10,6 @@ use ratatui::Terminal;
 use tui_textarea::{Input, Key, TextArea};
 
 use smol::net::TcpStream;
-//use std::net::TcpStream;
 
 use std::error::Error;
 use std::io;
@@ -36,7 +35,7 @@ fn cleanup(mut term: Terminal<CrosstermBackend<StdoutLock>>) {
     term.show_cursor().unwrap();
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    smol::block_on(async {
+    return smol::block_on(async {
         // Open a TCP stream to the socket address
         let stream = TcpStream::connect(SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 6000)).await.unwrap();
 
@@ -72,12 +71,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     //todo: server can send bad data and crash client
                     let packet: Packet = postcard::from_bytes(bytes_read).unwrap();
-                    //message_channel_sender.send(packet.clone()).await.ok();
                     consumed = bytes_read.len();
                     reader.consume(consumed);
                     message_channel_sender.send(packet).await.unwrap();
-                    //let string = format!("{}", String::from_utf8(packet.data).unwrap());
-                    //print!("{}", string);
                 }
                 Some(Err(e)) => {
                     //println!("Server Disconnected!");
@@ -104,8 +100,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 f.render_widget(Paragraph::new(lines.clone()).block(Block::default().title("Messages").borders(Borders::ALL)), main_layout[0]);
                 f.render_widget(textarea.widget(), main_layout[1]);
             }).unwrap();
-            match crossterm::event::read().unwrap().into() {
-                Input { key: Key::Esc, .. } => {
+            let inpt = crossterm::event::read().unwrap().into();
+            match inpt {
+                Input { key: Key::Char('s'), ctrl: true, .. } => {
                     let packet = Packet {
                         src: PktSource::UNDEFINED,
                         message_type: MessageType::STRING,
@@ -113,45 +110,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     };
                     writer.write(to_allocvec(&packet).unwrap().as_slice()).await.unwrap();
                 },
+                Input { key : Key::Char('c'), ctrl: true, .. } => {
+                    cleanup(term);
+                    return Ok(())
+                },
                 input => {
                     textarea.input(input);
                 }
             }
         }
-
-
-
-
-        //println!("Lines: {:?}", textarea.lines());
-        /*future::race(
-            async { //messages
-
-            },
-            async { //logic
-                loop {
-                    let mut line= String::new();
-                    if let Some(msg) = message_channel_receiver.recv().now_or_never() {
-                        println!("{}", String::from_utf8(msg.unwrap().data).unwrap())
-                    }
-                    match std::io::stdin().read_line(&mut line) {
-                        Err(e) => {
-                            return Err(e);
-                        }
-                        Ok(_read) => {
-                            let result = writer.write(to_allocvec(&Packet {
-                                src: PktSource::UNDEFINED,
-                                message_type: MessageType::STRING,
-                                data: Vec::from(line.clone()),
-                            }).unwrap().as_slice()).await;
-                            println!("wrote to stream; success={:?}", result.is_ok());
-                            line.clear();
-                        }
-                    }
-                }
-            }
-        ).await.unwrap();
-*/
-
     });
-    Ok(())
 }
