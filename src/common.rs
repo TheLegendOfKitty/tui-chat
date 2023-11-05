@@ -1,3 +1,4 @@
+use image::ImageFormat;
 use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use std::net::TcpStream;
@@ -12,9 +13,32 @@ pub enum Event {
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 #[derive(Clone)]
+#[serde(remote = "ImageFormat")]
+#[non_exhaustive]
+pub enum ImageFormatDef {
+    Png,
+    Jpeg,
+    Gif,
+    WebP,
+    Pnm,
+    Tiff,
+    Tga,
+    Dds,
+    Bmp,
+    Ico,
+    Hdr,
+    OpenExr,
+    Farbfeld,
+    Avif,
+    Qoi,
+}
+
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub enum MessageType {
     STRING,
-    IMAGE
+    #[serde(with = "ImageFormatDef")]
+    IMAGE(ImageFormat)
 }
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
@@ -25,7 +49,8 @@ pub enum PktSource {
     UNDEFINED //client should set source as undefined
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct Packet {
     pub src: PktSource,
     pub message_type: MessageType,

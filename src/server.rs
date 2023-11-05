@@ -1,9 +1,5 @@
 //#![feature(let_chains)]
-use std::io::Write;
 #[forbid(unsafe_code)]
-pub mod common;
-use crate::common::{Event, Packet, MessageType, PktSource};
-
 use smol::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use std::net::{TcpListener, TcpStream};
 use smol::channel::{Receiver, Sender, bounded};
@@ -13,6 +9,9 @@ use std::collections::HashMap;
 use async_dup::Arc;
 use postcard::{to_allocvec};
 use smol::Async;
+
+pub mod common;
+use crate::common::{Event, Packet, MessageType, PktSource};
 
 async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
     //active clients
