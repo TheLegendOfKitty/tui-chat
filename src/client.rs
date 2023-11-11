@@ -26,10 +26,9 @@ use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::{ResizeProtocol};
 use ratatui_image::ResizeImage;
 use smol::channel::{bounded, Receiver};
-use smol::io::{AsyncBufReadExt, BufReader};
+use smol::io::{BufReader};
 use std::panic;
 use core::time::Duration;
-use std::future::Future;
 use std::ops::Deref;
 use async_dup::Arc;
 use crossterm::execute;
@@ -81,7 +80,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Open a TCP stream to the socket address
         let stream = Async::<TcpStream>::connect(SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 6000)).await.unwrap();
 
-        //let mut binding = stream.clone();
         let stream_ref = Arc::new(stream);
         let mut reader = BufReader::new(stream_ref.clone());
         let mut writer = stream_ref;
@@ -109,7 +107,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
 
         let lines = Vec::new();
-        //let mut consumed;
 
         let mut app = App { terminal: term, image: None, message_channel_receiver, lines, picker, textarea };
         loop {
@@ -129,24 +126,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
             }
-            /*match reader.fill_buf().now_or_never() {
-                Some(Ok(bytes_read)) => 'a: {
-                    //todo: will this ever happen?
-                    if bytes_read.is_empty() { //nothing read
-                        break 'a;
-                    }
-                    //todo: server can send bad data and crash client
-                    let packet: Packet = postcard::from_bytes(bytes_read).unwrap();
-                    consumed = bytes_read.len();
-                    reader.consume(consumed);
-                    message_channel_sender.send(packet).await.unwrap();
-                }
-                Some(Err(e)) => {
-                    //println!("Server Disconnected!");
-                    panic!("{}", e);
-                }
-                _ => {}
-            }*/
 
             app.terminal.draw(|f| ui(f,
                                      &mut app.message_channel_receiver,
@@ -174,20 +153,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                             let format = image::guess_format(raw.as_slice()).unwrap();
                             //guess_format does not verify validity of the entire memory - for now, we'll load the image into memory to verify its validity
                             let _dyn_img = image::load_from_memory_with_format(raw.as_slice(), format).unwrap();
-                            //app.image = Option::from(picker.new_state(dyn_img));
                             let packet = Packet {
                                 src: PktSource::UNDEFINED,
                                 message_type: MessageType::IMAGE(format),
                                 data: raw,
                             };
-                            /*
-                            let encoded = to_allocvec(&packet).unwrap();
-                            let size : u32 = u32::try_from(encoded.len() * size_of::<u8>()).unwrap();
-
-                            app.lines.push(Line::from(format!("{:x}", md5::compute(encoded.as_slice()))));
-
-                            writer.write(&size.to_be_bytes()).await.unwrap();
-                            writer.write(encoded.as_slice()).await.unwrap();*/
                             send_with_header(&mut writer, packet).await.unwrap();
                             break 'a;
                         }
@@ -201,17 +171,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         message_type: MessageType::STRING,
                         data: Vec::from(input_lines.join("\n"))
                     };
-                    /*
-                    let encoded = to_allocvec(&packet).unwrap();
-                    //todo: no need to multiply by size_of::<u8>
-                    let size : u32 = u32::try_from(encoded.len() * size_of::<u8>()).unwrap();
-
-                    app.lines.push(Line::from(format!("{:x}", md5::compute(encoded.as_slice()))));
-                    */
                     send_with_header(&mut writer, packet).await.unwrap();
-                    /*
-                    writer.write(&size.to_be_bytes()).await.unwrap();
-                    writer.write(encoded.as_slice()).await.unwrap();*/
                 },
                 Input { key : Key::Char('c'), ctrl: true, .. } => {
                     return Ok(())

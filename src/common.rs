@@ -72,9 +72,10 @@ pub enum ReadResult {
     SUCCESS(Vec<u8>)
 }
 
-/// This function should not panic
+/// This function should not panic or use stdout
 pub async fn send_with_header(writer: &mut Arc<Async<TcpStream>>, packet: Packet) -> io::Result<()> {
     let encoded = to_allocvec(&packet).unwrap();
+    //todo: no need to multiply by size_of::<u8>?
     let size : u32 = u32::try_from(encoded.len() * size_of::<u8>()).unwrap();
 
     match writer.write(&size.to_be_bytes()).await {
@@ -92,7 +93,7 @@ pub async fn send_with_header(writer: &mut Arc<Async<TcpStream>>, packet: Packet
     return Ok(());
 }
 
-/// This function should not panic
+/// This function should not panic or use stdout
 pub async fn read_data(reader: &mut BufReader<Arc<Async<TcpStream>>>) -> io::Result<ReadResult> {
     let consumed;
     match reader.fill_buf().await {
@@ -110,19 +111,7 @@ pub async fn read_data(reader: &mut BufReader<Arc<Async<TcpStream>>>) -> io::Res
 
             let remaining_size = u32::from_be_bytes(header.try_into().unwrap()) - u32::try_from(data_bytes.len()).unwrap();
             if remaining_size != 0 {
-                /*
-                let raw = std::fs::read("/home/parsa/RustroverProjects/chat/target/debug/cat.jpg").unwrap();
-                let format = image::guess_format(raw.as_slice()).unwrap();
-                let packet = Packet {
-                    src: PktSource::UNDEFINED,
-                    message_type: MessageType::IMAGE(format),
-                    data: raw,
-                };
-                let encoded = to_allocvec(&packet).unwrap();*/
-
                 let mut remaining_buf = Vec::new();
-                /*let matching : Vec<(&u8, &u8)> = buf.iter().zip(&encoded).filter(|&(a, b)| a != b).collect();
-                println!("{:?}", matching);*/
                 remaining_buf.resize(usize::try_from(remaining_size).unwrap(), 0);
 
                 let mut final_buf = Vec::from(data_bytes);
@@ -135,32 +124,16 @@ pub async fn read_data(reader: &mut BufReader<Arc<Async<TcpStream>>>) -> io::Res
                 match res {
                     Ok(_) => {}
                     Err(_) => {
-                        //println!("{}", e);
                         return Ok(DISCONNECT) //the client is most likely disconnected
                     }
                 }
 
                 final_buf.append(&mut remaining_buf);
-                //println!("{:x}", md5::compute(final_buf.as_slice()));
 
-                /*
-                let mut count = 0;
-                let matching : Vec<(&u8, &u8)> = final_buf.iter().zip(&encoded).filter(|&(a, b)| {
-                    count += 1;
-                    a != b
-                }).collect();
-                println!("{:?}", matching);
-                println!("{}", count);*/
-
-                //let packet : Packet = postcard::from_bytes( final_buf.as_slice()).unwrap();
-                //sender.send(Event::Message(addr, packet)).await.ok();
                 return Ok(SUCCESS(final_buf));
 
             }
             else {
-                //println!("{:x}", md5::compute(data_bytes));
-                //let packet : Packet = postcard::from_bytes(data_bytes).unwrap();
-                //sender.send(Event::Message(addr, packet)).await.ok();
                 let final_buf = Vec::from(data_bytes);
                 consumed = bytes_read.len();
                 reader.consume(consumed);
