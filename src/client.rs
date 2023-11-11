@@ -20,16 +20,16 @@ use std::{fs, io};
 use std::io::StdoutLock;
 use std::net::{IpAddr, SocketAddr};
 use futures_util::FutureExt;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::Line;
-use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::picker::{Picker};
 use ratatui_image::protocol::{ResizeProtocol};
 use ratatui_image::ResizeImage;
 use smol::channel::{bounded, Receiver};
 use smol::io::{BufReader};
 use std::panic;
 use core::time::Duration;
-use std::ops::Deref;
+use std::ops::{Deref};
 use async_dup::Arc;
 use crossterm::execute;
 use smol::Async;
@@ -38,28 +38,37 @@ use crate::common::{MessageType, Packet, PktSource, read_data, ReadResult, send_
 
 pub mod common;
 
+#[derive(Clone)]
+struct ImageWithData {
+    img: Box<dyn ResizeProtocol>,
+    _height: u32,
+    _width: u32
+}
+
+
 struct App<'a> {
     terminal: Terminal<CrosstermBackend<StdoutLock<'a>>>,
-    image: Option<Box<dyn ResizeProtocol>>,
+    image: Option<ImageWithData>,
     message_channel_receiver: Receiver<Packet>,
     lines: Vec<Line<'a>>,
     picker: Picker,
-    textarea: TextArea<'a>
+    textarea: TextArea<'a>,
+    zoom: u16
 }
 
 impl Drop for App<'_> {
     fn drop(&mut self) {
-        cleanup(&mut self.terminal);
+        graceful_cleanup(&mut self.terminal);
     }
 }
 
-fn destruct_terminal() {
+fn unexpected_cleanup() {
     disable_raw_mode().unwrap();
     execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture).unwrap();
     execute!(io::stdout(), cursor::Show).unwrap();
 }
 
-fn cleanup(term: &mut Terminal<CrosstermBackend<StdoutLock>>) {
+fn graceful_cleanup(term: &mut Terminal<CrosstermBackend<StdoutLock>>) {
     disable_raw_mode().unwrap();
     crossterm::execute!(
             term.backend_mut(),
@@ -69,9 +78,14 @@ fn cleanup(term: &mut Terminal<CrosstermBackend<StdoutLock>>) {
     term.show_cursor().unwrap();
 }
 
+fn exit(app: App) -> ! {
+    drop(app);
+    std::process::exit(0);
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     panic::set_hook(Box::new(|panic_info| {
-        destruct_terminal();
+        unexpected_cleanup();
         better_panic::Settings::auto().create_panic_handler()(panic_info);
     }));
 
@@ -90,8 +104,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut stdout = stdout.lock();
 
         //should be initialized before backend
-        //let mut picker = Picker::from_termios(None).unwrap();
+        #[cfg(feature = "protocol_auto")]
+        let picker = Picker::from_termios(None).unwrap();
+
+        #[cfg(feature = "protocol_halfblocks")]
         let picker = Picker::new((10, 12), ProtocolType::Halfblocks, None).unwrap();
+
+        #[cfg(not(any(feature = "protocol_auto", feature = "protocol_halfblocks")))]
+        compile_error!("Neither protocol_auto nor protocol_halfblocks features were set!");
 
         enable_raw_mode().unwrap();
         crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture).unwrap();
@@ -108,7 +128,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let lines = Vec::new();
 
-        let mut app = App { terminal: term, image: None, message_channel_receiver, lines, picker, textarea };
+        let mut app = App { terminal: term, image: None, message_channel_receiver, lines, picker, textarea, zoom: 35 };
         loop {
             //todo: is this leaking anything?
             match read_data(&mut reader).now_or_never() {
@@ -130,9 +150,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             app.terminal.draw(|f| ui(f,
                                      &mut app.message_channel_receiver,
                                      &mut app.lines, &mut app.picker,
-                                     &mut app.image, &mut app.textarea
+                                     &mut app.image, &mut app.textarea, &app.zoom
             )).unwrap();
-            let inpt = match crossterm::event::poll(Duration::from_secs(0)).unwrap() {
+
+            let inpt : Input = match crossterm::event::poll(Duration::from_secs(0)).unwrap() {
                 true => {
                     crossterm::event::read().unwrap().into()
                 }
@@ -140,54 +161,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                     continue;
                 }
             };
-            match inpt {
-                Input { key: Key::Char('x'),  .. } => 'a : {
-                    let input_lines = app.textarea.lines();
-                    if input_lines == [""] {
-                        break 'a;
-                    }
-                    match input_lines.first().unwrap().deref()
-                    .split(' ').collect::<Vec<&str>>().first().unwrap().deref() {
-                        "/file" => {
-                            let raw = fs::read(input_lines[0].split(' ').collect::<Vec<&str>>()[1]).unwrap();
-                            let format = image::guess_format(raw.as_slice()).unwrap();
-                            //guess_format does not verify validity of the entire memory - for now, we'll load the image into memory to verify its validity
-                            let _dyn_img = image::load_from_memory_with_format(raw.as_slice(), format).unwrap();
-                            let packet = Packet {
-                                src: PktSource::UNDEFINED,
-                                message_type: MessageType::IMAGE(format),
-                                data: raw,
-                            };
-                            send_with_header(&mut writer, packet).await.unwrap();
-                            break 'a;
-                        }
-                        "/exit" => {
-                            return Ok(())
-                        }
-                        _ => {}
-                    }
-                    let packet = Packet {
-                        src: PktSource::UNDEFINED,
-                        message_type: MessageType::STRING,
-                        data: Vec::from(input_lines.join("\n"))
-                    };
-                    send_with_header(&mut writer, packet).await.unwrap();
-                },
-                Input { key : Key::Char('c'), ctrl: true, .. } => {
-                    return Ok(())
-                },
-                input => {
-                    app.textarea.input(input);
-                }
-            }
+            app = handle_input(inpt, &mut writer, app).await;
         }
     })
 }
 
 fn ui<B: Backend>(f: &mut Frame<B>, app_message_channel_receiver: &mut Receiver<Packet>,
                   app_lines: &mut Vec<Line>, app_picker: &mut Picker,
-                  app_image: &mut Option<Box<dyn ResizeProtocol>>, app_textarea: &mut TextArea
-) {
+                  app_image: &mut Option<ImageWithData>, app_textarea: &mut TextArea,
+                  app_zoom: &u16)
+{
     app_message_channel_receiver.recv().now_or_never().map_or(0, |res| {
         let packet = res.unwrap();
         match packet.message_type {
@@ -196,8 +179,12 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_message_channel_receiver: &mut Receiver<
             }
             MessageType::IMAGE(imgtype) => {
                 let dyn_img = image::load_from_memory_with_format(packet.data.as_slice(), imgtype).unwrap();
-                let image = app_picker.new_state(dyn_img);
-                *app_image = Option::from(image);
+                let image = app_picker.new_state(dyn_img.clone());
+                *app_image = Option::from(ImageWithData {
+                    img: image,
+                    _height: dyn_img.height(),
+                    _width: dyn_img.width(),
+                });
             }
         }
         0
@@ -210,8 +197,89 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_message_channel_receiver: &mut Receiver<
         .split(f.size());
     f.render_widget(Paragraph::new(app_lines.clone()).block(Block::default().title("Messages").borders(Borders::ALL)), main_layout[0]);
     f.render_widget(app_textarea.widget(), main_layout[1]);
+
     app_image.clone().map_or(0, |mut img| {
-        f.render_stateful_widget(ResizeImage::new(None), main_layout[0], &mut img);
+        let img_layout = Block::default().borders(Borders::ALL).title("Image");
+        f.render_stateful_widget(ResizeImage::new(None),
+                                 img_layout.inner(centered_rect(f.size(), *app_zoom, *app_zoom)),
+                                 &mut img.img);
+        f.render_widget(img_layout, centered_rect(f.size(), *app_zoom, *app_zoom));
         0
     });
+
+}
+
+fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+/*static handle_input: fn(Input, &mut Arc<Async<TcpStream>>, &mut App) = move*/
+async fn handle_input<'a>(inpt: Input, mut writer: &mut Arc<Async<TcpStream>>, mut app: App<'a>) -> App<'a> {
+    match inpt {
+        Input { key: Key::Char('x'),  .. } => 'a : {
+            let input_lines = app.textarea.lines();
+            if input_lines == [""] {
+                break 'a;
+            }
+            match input_lines.first().unwrap().deref()
+                .split(' ').collect::<Vec<&str>>().first().unwrap().deref() {
+                "/file" => {
+                    let raw = fs::read(input_lines[0].split(' ').collect::<Vec<&str>>()[1]).unwrap();
+                    let format = image::guess_format(raw.as_slice()).unwrap();
+                    //guess_format does not verify validity of the entire memory - for now, we'll load the image into memory to verify its validity
+                    let _dyn_img = image::load_from_memory_with_format(raw.as_slice(), format).unwrap();
+                    let packet = Packet {
+                        src: PktSource::UNDEFINED,
+                        message_type: MessageType::IMAGE(format),
+                        data: raw,
+                    };
+                    send_with_header(&mut writer, packet).await.unwrap();
+                    break 'a;
+                }
+                "/exit" => {
+                    exit(app);
+                }
+                _ => {}
+            }
+            let packet = Packet {
+                src: PktSource::UNDEFINED,
+                message_type: MessageType::STRING,
+                data: Vec::from(input_lines.join("\n"))
+            };
+            send_with_header(&mut writer, packet).await.unwrap();
+        },
+        Input { key : Key::Char('c'), ctrl: true, .. } => {
+            exit(app)
+        },
+        Input { key : Key::Char('+'), /*ctrl: true,*/ .. } => {
+            if app.zoom < 100 {
+                app.zoom += 5;
+            }
+        },
+        Input { key : Key::Char('-'), /*ctrl: true,*/ .. } => {
+            if app.zoom > 35 {
+                app.zoom -= 5;
+            }
+        },
+        input => {
+            app.textarea.input(input);
+        }
+    }
+    return app;
 }
