@@ -53,6 +53,7 @@ static _IMAGE_MOVE_UP: Input = Input { key: Key::Up, ctrl: false, alt: false };
 static _IMAGE_MOVE_DOWN: Input = Input { key: Key::Down, ctrl: false, alt: false };
 static SHIFT_TO_MESSAGES: Input = Input { key: Key::Char('<'), ctrl: false, alt: false };
 static SHIFT_TO_INPUT: Input = Input { key: Key::Char('>'), ctrl: false, alt: false };
+static MESSAGE_SELECT: Input = Input { key: Key::Enter, ctrl: false, alt: false };
 const POLL_TIME: Duration = Duration::from_millis(50);
 
 struct StatefulList<T> {
@@ -94,6 +95,10 @@ impl<T> StatefulList<T> {
             None => 0,
         };
         self.state.select(Some(i));
+    }
+
+    fn current(&self) -> &T {
+        &self.items[self.state.selected().unwrap()]
     }
 
     fn unselect(&mut self) {
@@ -446,13 +451,17 @@ async fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, mut a
             app
         }
         Menu::MessageList(list) => {
-            messages_list_input(inpt, list, &mut app.messages_owner, &mut app.state).await;
+            messages_list_input(inpt, list, &mut app.messages_owner, &mut app.state, &mut app.picker,
+            &mut app.image).await;
             app
         }
     }
 }
 
-async fn messages_list_input(inpt: Input, list: Rc<QCell<StatefulList<Packet>>>, list_owner: &mut QCellOwner, app_state: &mut State<'_>) {
+//todo: does this need to be async?
+async fn messages_list_input(inpt: Input, list: Rc<QCell<StatefulList<Packet>>>, list_owner: &mut QCellOwner,
+                             app_state: &mut State<'_>, app_picker: &mut Picker, app_image: &mut Option<ImageWithData>)
+{
     match inpt {
         _ if inpt == SHIFT_TO_INPUT => {
             list.rw(list_owner).unselect();
@@ -463,6 +472,24 @@ async fn messages_list_input(inpt: Input, list: Rc<QCell<StatefulList<Packet>>>,
         }
         Input { key: Key::Down, .. } => {
             list.rw(list_owner).next();
+        }
+        _ if inpt == MESSAGE_SELECT => {
+            let packet = list.ro(list_owner).current();
+            match packet.message_type {
+                MessageType::STRING => {
+
+                }
+                MessageType::IMAGE(format) => {
+                    let dyn_img = image::load_from_memory_with_format(packet.data.as_slice(), format).unwrap();
+                    let image = app_picker.new_state(dyn_img.clone());
+                    *app_image = Option::from(ImageWithData {
+                        img: image,
+                        _height: dyn_img.height(),
+                        _width: dyn_img.width(),
+                    });
+                    app_state.shift_state(Menu::ImageView);
+                }
+            }
         }
         Input { .. } => {}
     }
