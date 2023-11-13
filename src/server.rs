@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::nursery, clippy::cargo)]
+#![allow(clippy::needless_return)]
+
 use smol::io::{BufReader};
 use std::net::{TcpListener, TcpStream};
 use smol::channel::{Receiver, Sender, bounded};

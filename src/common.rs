@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::nursery, clippy::cargo)]
+#![allow(clippy::needless_return)]
 
 use std::io;
 use std::mem::size_of;
@@ -100,7 +101,7 @@ pub async fn read_data(reader: &mut BufReader<Arc<Async<TcpStream>>>) -> io::Res
         Ok(bytes_read) => {
             if bytes_read.is_empty() {
                 //nothing read... is the client even connected?
-                if let Ok(0) = reader.read(&mut [0u8; 0]).await {
+                if matches!(reader.read(&mut [0u8; 0]).await, Ok(0)) {
                     // The client is disconnected
                     return Ok(DISCONNECT);
                 }
