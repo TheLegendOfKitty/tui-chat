@@ -178,25 +178,25 @@ mod tests {
                  |
 MessageList <----------> ImageView
 */
-struct State {
-    stack: Vec<Box<dyn Shiftable>>,
+struct State<'a> {
+    stack: Vec<&'a mut dyn Shiftable>,
     _cursor_visible: bool
 }
 
-impl State {
-    fn push(&mut self, m: Box<dyn Shiftable>) {
+impl<'a> State<'a> {
+    fn push(&mut self, m: &mut dyn Shiftable) {
         self.stack.push(m);
     }
 
     fn pop(&mut self) -> Option<Box<dyn Shiftable>> {
-        self.stack.pop()
+        Box::new(*self.stack.pop())
     }
 
-    fn current(&self) -> Option<&Box<dyn Shiftable>> {
+    fn current(&self) -> Option<&dyn Shiftable> {
         self.stack.last()
     }
 
-    fn current_mut(&mut self) -> Option<&mut Box<dyn Shiftable>> {
+    fn current_mut(&mut self) -> Option<&mut dyn Shiftable> {
         self.stack.last_mut()
     }
 
@@ -205,13 +205,13 @@ impl State {
         //self.focus = self.current().unwrap().clone();
     }
 
-    fn shift_state(&mut self, menu: Box<dyn Shiftable>) {
+    fn shift_state(&mut self, menu: &mut dyn Shiftable) {
         //self.focus = menu.clone();
         self.push(menu);
     }
 
-    fn base(&self) -> Option<&Box<dyn Shiftable>> {
-        self.stack.first()
+    fn base(&self) -> Option<&mut TextArea> {
+        self.stack.first().downcast_mut::<TextArea>()
     }
 }
 
@@ -221,7 +221,7 @@ trait Shiftable : downcast_rs::Downcast {
 }
 impl_downcast!(Shiftable);
 
-impl Shiftable for TextArea {
+impl Shiftable for TextArea<'static> {
     fn shift_to(&mut self) {
         todo!()
     }
@@ -260,9 +260,8 @@ struct App<'a> {
     picker: Picker,
     zoom_x: u16,
     zoom_y: u16,
-    state: State,
-    messages: Rc<QCell<StatefulList<Packet>>>,
-    messages_owner: QCellOwner
+    state: State<'a>,
+    messages: StatefulList<Packet>
 }
 
 impl Drop for App<'_> {
@@ -329,7 +328,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         //let mut textarea_owner = QCellOwner::new();
 
-        let textarea = TextArea::default(); //Rc::new(QCell::new(&textarea_owner, TextArea::default()));
+        let mut textarea = TextArea::default(); //Rc::new(QCell::new(&textarea_owner, TextArea::default()));
 
         /*textarea.rw(&mut textarea_owner).set_block(
             Block::default()
@@ -340,15 +339,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
 
          */
-        let messages_owner = QCellOwner::new();
+        //let messages_owner = QCellOwner::new();
 
         let mut app = App { terminal: term, image: None, message_channel_receiver, picker,
             zoom_x: 35, zoom_y: 35, state: State {
-            stack: vec![Box::new(textarea)],
+            stack: vec![&mut textarea],
                 _cursor_visible: true
         },
-            messages: Rc::new(QCell::new(&messages_owner, StatefulList::with_items(Vec::new()))),
-            messages_owner
+            messages: StatefulList::with_items(Vec::new())
         };
         loop {
             //todo: is this leaking anything?
@@ -368,13 +366,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
 
-            message_recv(&app.message_channel_receiver, &mut app.messages.rw(&mut app.messages_owner).items,
+            message_recv(&app.message_channel_receiver, &mut app.messages.items,
                          &mut app.picker, &mut app.image, &mut app.state);
 
-            app.terminal.draw(|f| ui(f, &mut app.messages.rw(&mut app.messages_owner),
+            app.terminal.draw(|f| ui(f, &mut app.messages,
                                      &mut app.image, &app.zoom_x, &app.zoom_y, &app.state
             )).unwrap();
-
 
             let inpt : Input = match crossterm::event::poll(POLL_TIME).unwrap() {
                 true => {
@@ -457,7 +454,7 @@ fn message_recv(app_message_channel_receiver: &Receiver<Packet>, app_messages: &
                     _height: dyn_img.height(),
                     _width: dyn_img.width(),
                 });
-                app_state.shift_state(Box::new(ImageView));
+                app_state.shift_state(&mut ImageView);
             }
         }
         app_messages.push(packet);
@@ -487,10 +484,11 @@ fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
 
 /*static handle_input: fn(Input, &mut Arc<Async<TcpStream>>, &mut App) = move*/
 async fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, mut app: App<'a>) -> App<'a> {
-    return match app.state.current_mut().unwrap() {
-        state if let Some(textarea) = state.downcast_mut::<TextArea>() => {
+    let state = app.state.current_mut().unwrap();
+    return match state {
+        _ if let Some(textarea) = state.downcast_mut::<TextArea>() => {
             match messages_input(inpt, writer, textarea,
-                                 &mut app.state, app.messages.clone(), &mut app.messages_owner,
+                                 &mut app.state, &mut app.messages,
             &mut app.terminal).await
             {
                 Ok(_) => {
@@ -506,22 +504,25 @@ async fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, mut a
             app
         }
         state if let Some(list) = state.downcast_mut::<StatefulList<Packet>>() => {
-            messages_list_input(inpt, list, &mut app.messages_owner, &mut app.state, &mut app.picker,
-            &mut app.image, app.textarea.clone(), &mut app.textarea_owner).await;
+            messages_list_input(inpt, list,  &mut app.state, &mut app.picker,
+            &mut app.image, app.state.base().unwrap()).await;
             app
+        }
+        _ => {
+            panic!("Invalid state")
         }
     }
 }
 
 //todo: does this need to be async?
-async fn messages_list_input(inpt: Input, list: Rc<QCell<StatefulList<Packet>>>, list_owner: &mut QCellOwner,
+async fn messages_list_input(inpt: Input, list: &mut StatefulList<Packet>,
                              app_state: &mut State<'_>, app_picker: &mut Picker, app_image: &mut Option<ImageWithData>,
-app_textarea: Rc<QCell<TextArea<'_>>>, app_textarea_owner: &mut QCellOwner)
+app_textarea: &mut TextArea<'_>)
 {
     match inpt {
         _ if inpt == SHIFT_TO_INPUT => {
-            list.rw(list_owner).unselect();
-            app_textarea.rw(app_textarea_owner).set_block(Block::default()
+            list.unselect();
+            app_textarea.set_block(Block::default()
                 .borders(Borders::ALL)
                 .title("Input")
                 .style(Style::default()
@@ -529,13 +530,13 @@ app_textarea: Rc<QCell<TextArea<'_>>>, app_textarea_owner: &mut QCellOwner)
             app_state.shift_back();
         }
         Input { key: Key::Up, .. } => {
-            list.rw(list_owner).previous();
+            list.previous();
         }
         Input { key: Key::Down, .. } => {
-            list.rw(list_owner).next();
+            list.next();
         }
         _ if inpt == MESSAGE_SELECT => {
-            let packet = list.ro(list_owner).current();
+            let packet = list.current();
             match &packet.message_type {
                 MessageType::STRING => {
 
@@ -549,7 +550,7 @@ app_textarea: Rc<QCell<TextArea<'_>>>, app_textarea_owner: &mut QCellOwner)
                         _height: dyn_img.height(),
                         _width: dyn_img.width(),
                     });
-                    app_state.shift_state(Menu::ImageView);
+                    app_state.shift_state(&mut ImageView);
                 }
             }
         }
@@ -584,8 +585,8 @@ async fn images_input(inpt: Input, app_zoom_x: &mut u16, app_zoom_y: &mut u16, a
     }
 }
 
-async fn messages_input<B: Backend>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, text_area: &mut TextArea, app_state: &mut State<'_>,
-                        message_list: Rc<QCell<StatefulList<Packet>>>, message_list_owner: &mut QCellOwner,
+async fn messages_input<B: Backend>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, text_area: &mut TextArea<'_>, app_state: &mut State<'_>,
+                        message_list: &mut StatefulList<Packet>,
                         app_terminal: &mut Terminal<B>) -> Result<(), ()>
 {
     match inpt {
@@ -628,12 +629,12 @@ async fn messages_input<B: Backend>(inpt: Input, writer: &mut Arc<Async<TcpStrea
             send_with_header(writer, packet).await.unwrap();
         },
         _ if inpt == SHIFT_TO_MESSAGES => {
-            message_list.rw(message_list_owner).state.select(Some(0));
+            message_list.state.select(Some(0));
             text_area.set_block(Block::default()
                 .borders(Borders::ALL)
                 .title("Input")
                 .style(Style::default()));
-            app_state.shift_state(Menu::MessageList(message_list));
+            app_state.shift_state(message_list);
         }
         Input { key : Key::Char('c'), ctrl: true, .. } => {
             return Err(());
