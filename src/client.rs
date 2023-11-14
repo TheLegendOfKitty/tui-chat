@@ -1,5 +1,6 @@
 //! Client
 
+#![feature(if_let_guard)]
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::nursery, clippy::cargo)]
@@ -30,14 +31,17 @@ use smol::channel::{bounded, Receiver};
 use smol::io::{BufReader};
 use std::panic;
 use core::time::Duration;
+use std::any::{Any, TypeId};
 use std::fmt::{Debug, Formatter};
 use std::ops::{Deref};
 use std::path::Path;
 use std::rc::Rc;
 use async_dup::Arc;
 use crossterm::execute;
+use downcast_rs::impl_downcast;
 use qcell::{QCell, QCellOwner};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Text;
 use smol::Async;
 
 use crate::common::{MessageType, Packet, PktSource, read_data, ReadResult, send_with_header, ImageData};
@@ -115,6 +119,7 @@ struct ImageWithData {
     _width: u32
 }
 
+/*
 #[derive(Clone)]
 enum Menu<'a> {
     MessageInput(Rc<QCell<TextArea<'a>>>),
@@ -166,38 +171,85 @@ mod tests {
     }
 }
 
+*/
+
 /*
             MessageInput
                  |
 MessageList <----------> ImageView
 */
-struct State<'a> {
-    stack: Vec<Menu<'a>>,
-    focus: Menu<'a>,
+struct State {
+    stack: Vec<Box<dyn Shiftable>>,
     _cursor_visible: bool
 }
 
-impl<'a> State<'a> {
-    fn push(&mut self, m: Menu<'a>) {
+impl State {
+    fn push(&mut self, m: Box<dyn Shiftable>) {
         self.stack.push(m);
     }
 
-    fn pop(&mut self) -> Option<Menu<'a>> {
+    fn pop(&mut self) -> Option<Box<dyn Shiftable>> {
         self.stack.pop()
     }
 
-    fn current(&self) -> Option<&Menu<'a>> {
+    fn current(&self) -> Option<&Box<dyn Shiftable>> {
         self.stack.last()
+    }
+
+    fn current_mut(&mut self) -> Option<&mut Box<dyn Shiftable>> {
+        self.stack.last_mut()
     }
 
     fn shift_back(&mut self) {
         self.pop().unwrap();
-        self.focus = self.current().unwrap().clone();
+        //self.focus = self.current().unwrap().clone();
     }
 
-    fn shift_state(&mut self, menu: Menu<'a>) {
-        self.focus = menu.clone();
+    fn shift_state(&mut self, menu: Box<dyn Shiftable>) {
+        //self.focus = menu.clone();
         self.push(menu);
+    }
+
+    fn base(&self) -> Option<&Box<dyn Shiftable>> {
+        self.stack.first()
+    }
+}
+
+trait Shiftable : downcast_rs::Downcast {
+    fn shift_to(&mut self);
+    fn shift_from(&mut self);
+}
+impl_downcast!(Shiftable);
+
+impl Shiftable for TextArea {
+    fn shift_to(&mut self) {
+        todo!()
+    }
+
+    fn shift_from(&mut self) {
+        todo!()
+    }
+}
+
+impl Shiftable for StatefulList<Packet> {
+    fn shift_to(&mut self) {
+        todo!()
+    }
+
+    fn shift_from(&mut self) {
+        todo!()
+    }
+}
+
+struct ImageView;
+
+impl Shiftable for ImageView {
+    fn shift_to(&mut self) {
+        todo!()
+    }
+
+    fn shift_from(&mut self) {
+        todo!()
     }
 }
 
@@ -206,11 +258,9 @@ struct App<'a> {
     image: Option<ImageWithData>,
     message_channel_receiver: Receiver<Packet>,
     picker: Picker,
-    textarea: Rc<QCell<TextArea<'a>>>,
-    textarea_owner: QCellOwner,
     zoom_x: u16,
     zoom_y: u16,
-    state: State<'a>,
+    state: State,
     messages: Rc<QCell<StatefulList<Packet>>>,
     messages_owner: QCellOwner
 }
@@ -277,11 +327,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         let backend = CrosstermBackend::new(stdout);
         let term = Terminal::new(backend).unwrap();
 
-        let mut textarea_owner = QCellOwner::new();
+        //let mut textarea_owner = QCellOwner::new();
 
-        let textarea = Rc::new(QCell::new(&textarea_owner, TextArea::default()));
+        let textarea = TextArea::default(); //Rc::new(QCell::new(&textarea_owner, TextArea::default()));
 
-        textarea.rw(&mut textarea_owner).set_block(
+        /*textarea.rw(&mut textarea_owner).set_block(
             Block::default()
                 .borders(Borders::ALL)
                 .title("Input")
@@ -289,12 +339,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .fg(Color::Blue))
         );
 
+         */
         let messages_owner = QCellOwner::new();
 
-        let mut app = App { terminal: term, image: None, message_channel_receiver, picker, textarea: textarea.clone(), textarea_owner,
+        let mut app = App { terminal: term, image: None, message_channel_receiver, picker,
             zoom_x: 35, zoom_y: 35, state: State {
-            stack: vec![Menu::MessageInput(textarea.clone())],
-            focus: Menu::MessageInput(textarea),
+            stack: vec![Box::new(textarea)],
                 _cursor_visible: true
         },
             messages: Rc::new(QCell::new(&messages_owner, StatefulList::with_items(Vec::new()))),
@@ -322,8 +372,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                          &mut app.picker, &mut app.image, &mut app.state);
 
             app.terminal.draw(|f| ui(f, &mut app.messages.rw(&mut app.messages_owner),
-                                     &mut app.image, &mut app.textarea,
-                                     &app.textarea_owner, &app.zoom_x, &app.zoom_y, &app.state
+                                     &mut app.image, &app.zoom_x, &app.zoom_y, &app.state
             )).unwrap();
 
 
@@ -342,8 +391,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[allow(clippy::ptr_arg)]
 fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut StatefulList<Packet>,
-                  app_image: &mut Option<ImageWithData>, app_textarea: &mut Rc<QCell<TextArea>>,
-                  app_textarea_owner: &QCellOwner,
+                  app_image: &mut Option<ImageWithData>,
                   app_zoom_x: &u16, app_zoom_y: &u16, app_state: &State)
 {
     let main_layout = Layout::default()
@@ -375,10 +423,10 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut StatefulList<Packet>,
         .highlight_symbol(">> ");
 
     f.render_stateful_widget(messages_list,main_layout[0], &mut app_messages.state);
-    f.render_widget(app_textarea.ro(app_textarea_owner).widget(), main_layout[1]);
+    f.render_widget(app_state.base().unwrap().widget(), main_layout[1]);
 
     let _u = app_image.clone().map_or(0, |mut img| {
-        if app_state.focus == Menu::ImageView {
+        if app_state.current().unwrap() == Some(ImageView) {
             let img_layout = Block::default().borders(Borders::ALL).title("Image");
             f.render_stateful_widget(ResizeImage::new(None),
                                      img_layout.inner(centered_rect(f.size(), *app_zoom_x, *app_zoom_y)),
@@ -409,7 +457,7 @@ fn message_recv(app_message_channel_receiver: &Receiver<Packet>, app_messages: &
                     _height: dyn_img.height(),
                     _width: dyn_img.width(),
                 });
-                app_state.shift_state(Menu::ImageView);
+                app_state.shift_state(Box::new(ImageView));
             }
         }
         app_messages.push(packet);
@@ -439,9 +487,9 @@ fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
 
 /*static handle_input: fn(Input, &mut Arc<Async<TcpStream>>, &mut App) = move*/
 async fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, mut app: App<'a>) -> App<'a> {
-    return match app.state.focus.clone() {
-        Menu::MessageInput(textarea) => {
-            match messages_input(inpt, writer, textarea, &mut app.textarea_owner,
+    return match app.state.current_mut().unwrap() {
+        state if let Some(textarea) = state.downcast_mut::<TextArea>() => {
+            match messages_input(inpt, writer, textarea,
                                  &mut app.state, app.messages.clone(), &mut app.messages_owner,
             &mut app.terminal).await
             {
@@ -453,11 +501,11 @@ async fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, mut a
                 }
             }
         }
-        Menu::ImageView => {
+        state if let Some(_) = state.downcast_ref::<ImageView>() => {
             images_input(inpt, &mut app.zoom_x, &mut app.zoom_y, &mut app.state).await;
             app
         }
-        Menu::MessageList(list) => {
+        state if let Some(list) = state.downcast_mut::<StatefulList<Packet>>() => {
             messages_list_input(inpt, list, &mut app.messages_owner, &mut app.state, &mut app.picker,
             &mut app.image, app.textarea.clone(), &mut app.textarea_owner).await;
             app
@@ -536,14 +584,13 @@ async fn images_input(inpt: Input, app_zoom_x: &mut u16, app_zoom_y: &mut u16, a
     }
 }
 
-async fn messages_input<B: Backend>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, text_area: Rc<QCell<TextArea<'_>>>,
-                        text_area_owner: &mut QCellOwner, app_state: &mut State<'_>,
+async fn messages_input<B: Backend>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, text_area: &mut TextArea, app_state: &mut State<'_>,
                         message_list: Rc<QCell<StatefulList<Packet>>>, message_list_owner: &mut QCellOwner,
                         app_terminal: &mut Terminal<B>) -> Result<(), ()>
 {
     match inpt {
         _ if inpt == SEND => 'a : {
-            let input_lines = text_area.ro(text_area_owner).lines();
+            let input_lines = text_area.lines();
             if input_lines == [""] {
                 break 'a;
             }
@@ -582,7 +629,7 @@ async fn messages_input<B: Backend>(inpt: Input, writer: &mut Arc<Async<TcpStrea
         },
         _ if inpt == SHIFT_TO_MESSAGES => {
             message_list.rw(message_list_owner).state.select(Some(0));
-            text_area.rw(text_area_owner).set_block(Block::default()
+            text_area.set_block(Block::default()
                 .borders(Borders::ALL)
                 .title("Input")
                 .style(Style::default()));
@@ -592,7 +639,7 @@ async fn messages_input<B: Backend>(inpt: Input, writer: &mut Arc<Async<TcpStrea
             return Err(());
         },
         input => {
-            text_area.rw(text_area_owner).input(input);
+            text_area.input(input);
         }
     }
     return Ok(())
