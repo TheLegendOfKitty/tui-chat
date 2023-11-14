@@ -32,6 +32,7 @@ use std::panic;
 use core::time::Duration;
 use std::fmt::{Debug, Formatter};
 use std::ops::{Deref};
+use std::path::Path;
 use std::rc::Rc;
 use async_dup::Arc;
 use crossterm::execute;
@@ -39,7 +40,7 @@ use qcell::{QCell, QCellOwner};
 use ratatui::style::{Color, Modifier, Style};
 use smol::Async;
 
-use crate::common::{MessageType, Packet, PktSource, read_data, ReadResult, send_with_header};
+use crate::common::{MessageType, Packet, PktSource, read_data, ReadResult, send_with_header, ImageData};
 
 pub mod common;
 
@@ -109,6 +110,7 @@ impl<T> StatefulList<T> {
 #[derive(Clone)]
 struct ImageWithData {
     img: Box<dyn ResizeProtocol>,
+    name: String,
     _height: u32,
     _width: u32
 }
@@ -350,12 +352,12 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut StatefulList<Packet>,
 
     let messages: Vec<ListItem> = app_messages.items.iter()
         .map(|packet| {
-            match packet.message_type {
+            match &packet.message_type {
                 MessageType::STRING => {
                     ListItem::new(String::from_utf8(packet.data.clone()).unwrap())
                 }
                 MessageType::IMAGE(img) => {
-                    ListItem::new(format!("Image of type {:?}", img))
+                    ListItem::new(format!("Image of type {:?}, {}", img.format, img.name))
                 }
             }.style(Style::default().fg(Color::White).bg(Color::Black))
         }).collect();
@@ -395,11 +397,12 @@ fn message_recv(app_message_channel_receiver: &Receiver<Packet>, app_messages: &
             MessageType::STRING => {
                 //app_lines.push(Line::from(String::from_utf8(packet.data).unwrap()));
             }
-            MessageType::IMAGE(imgtype) => {
-                let dyn_img = image::load_from_memory_with_format(packet.data.as_slice(), imgtype).unwrap();
+            MessageType::IMAGE(ref imgtype) => {
+                let dyn_img = image::load_from_memory_with_format(packet.data.as_slice(), imgtype.format).unwrap();
                 let image = app_picker.new_state(dyn_img.clone());
                 *app_image = Option::from(ImageWithData {
                     img: image,
+                    name: imgtype.name.clone(),
                     _height: dyn_img.height(),
                     _width: dyn_img.width(),
                 });
@@ -475,15 +478,16 @@ async fn messages_list_input(inpt: Input, list: Rc<QCell<StatefulList<Packet>>>,
         }
         _ if inpt == MESSAGE_SELECT => {
             let packet = list.ro(list_owner).current();
-            match packet.message_type {
+            match &packet.message_type {
                 MessageType::STRING => {
 
                 }
-                MessageType::IMAGE(format) => {
-                    let dyn_img = image::load_from_memory_with_format(packet.data.as_slice(), format).unwrap();
+                MessageType::IMAGE(imagedata) => {
+                    let dyn_img = image::load_from_memory_with_format(packet.data.as_slice(), imagedata.format).unwrap();
                     let image = app_picker.new_state(dyn_img.clone());
                     *app_image = Option::from(ImageWithData {
                         img: image,
+                        name: imagedata.name.clone(),
                         _height: dyn_img.height(),
                         _width: dyn_img.width(),
                     });
@@ -535,13 +539,18 @@ async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, text_ar
             match input_lines.first().unwrap().deref()
                 .split(' ').collect::<Vec<&str>>().first().unwrap().deref() {
                 "/file" => {
-                    let raw = fs::read(input_lines[0].split(' ').collect::<Vec<&str>>()[1]).unwrap();
+                    let path = Path::new(input_lines[0].split(' ').collect::<Vec<&str>>()[1]);
+                    let name : String = path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap();
+                    let raw = fs::read(path).unwrap();
                     let format = image::guess_format(raw.as_slice()).unwrap();
                     //guess_format does not verify validity of the entire memory - for now, we'll load the image into memory to verify its validity
                     let _dyn_img = image::load_from_memory_with_format(raw.as_slice(), format).unwrap();
                     let packet = Packet {
                         src: PktSource::UNDEFINED,
-                        message_type: MessageType::IMAGE(format),
+                        message_type: MessageType::IMAGE(ImageData {
+                            format, name}),
                         data: raw,
                     };
                     send_with_header(writer, packet).await.unwrap();

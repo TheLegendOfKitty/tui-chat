@@ -23,7 +23,8 @@ async-dup = "1.2.2"
 #viuer = "0.7.1"
 
 #serialization
-serde = "1.0.190"
+serde = {version = "1.0.192", features = ["std"]}
+serde_with = "3.4.0"
 postcard = { version = "1.0.8", features = ["alloc", "use-std", "use-crc"]}
 heapless = "0.7.16"
 

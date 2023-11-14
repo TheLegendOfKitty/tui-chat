@@ -42,13 +42,19 @@ pub enum ImageFormatDef {
     Avif,
     Qoi,
 }
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Clone)]
+pub struct ImageData {
+    #[serde(with = "ImageFormatDef")]
+    pub format: ImageFormat,
+    pub name: String
+}
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 #[derive(Clone)]
 pub enum MessageType {
     STRING,
-    #[serde(with = "ImageFormatDef")]
-    IMAGE(ImageFormat)
+    IMAGE(ImageData)
 }
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
