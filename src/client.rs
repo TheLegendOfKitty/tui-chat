@@ -4,7 +4,10 @@
 #![deny(clippy::all)]
 #![warn(clippy::nursery, clippy::cargo)]
 #![allow(clippy::needless_return)]
+#![feature(let_chains)]
 
+#[cfg(feature = "protocol_halfblocks")]
+use ratatui_image::picker::ProtocolType;
 use crossterm::cursor;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::terminal::{
@@ -33,10 +36,8 @@ use core::time::Duration;
 use std::fmt::{Debug, Formatter};
 use std::ops::{Deref};
 use std::path::Path;
-use std::rc::Rc;
 use async_dup::Arc;
 use crossterm::execute;
-use qcell::{QCell, QCellOwner};
 use ratatui::style::{Color, Modifier, Style};
 use smol::Async;
 
@@ -115,11 +116,10 @@ struct ImageWithData {
     _width: u32
 }
 
-#[derive(Clone)]
 enum Menu<'a> {
-    MessageInput(Rc<QCell<TextArea<'a>>>),
+    MessageInput(TextArea<'a>),
     ImageView,
-    MessageList(Rc<QCell<StatefulList<Packet>>>)
+    MessageList(StatefulList<Packet>)
 }
 
 impl<'a> PartialEq for Menu<'a> {
@@ -127,6 +127,18 @@ impl<'a> PartialEq for Menu<'a> {
         std::mem::discriminant(self) == std::mem::discriminant(other)
     }
 }
+
+/*impl<'a> PartialEq<Menu> for Menu<'a> {
+    fn eq(&self, other: &Menu) -> bool {
+        match other {
+            Menu::MessageInput(_) => {
+                *self == Menu::MessageInput
+            }
+            Menu::ImageView => {}
+            Menu::MessageList(_) => {}
+        }
+    }
+}*/
 
 impl <'a> Debug for Menu<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -149,18 +161,13 @@ mod tests {
     use super::*;
     #[test]
     fn test_menu_eq() {
-        let owner1 = QCellOwner::new();
-        let owner2 = QCellOwner::new();
-
-        assert_eq!(Menu::MessageInput(Rc::new(QCell::new(&owner1, TextArea::default()))),
-                   Menu::MessageInput(Rc::new(QCell::new(&owner2, TextArea::default())))
+        assert_eq!(Menu::MessageInput(TextArea::default()),
+                   Menu::MessageInput(TextArea::default())
         )
     }
     #[test]
     fn test_menu_ne() {
-        let owner1 = QCellOwner::new();
-
-        assert_ne!(Menu::MessageInput(Rc::new(QCell::new(&owner1, TextArea::default()))),
+        assert_ne!(Menu::MessageInput(TextArea::default()),
                    Menu::ImageView
         )
     }
@@ -173,7 +180,6 @@ MessageList <----------> ImageView
 */
 struct State<'a> {
     stack: Vec<Menu<'a>>,
-    focus: Menu<'a>,
     _cursor_visible: bool
 }
 
@@ -186,19 +192,33 @@ impl<'a> State<'a> {
         self.stack.pop()
     }
 
-    fn current(&self) -> Option<&Menu<'a>> {
+    fn focus(&self) -> Option<&Menu<'a>> {
         self.stack.last()
     }
 
-    fn shift_back(&mut self) {
-        self.pop().unwrap();
-        self.focus = self.current().unwrap().clone();
+    fn _focus_mut(&mut self) -> Option<&mut Menu<'a>> {
+        self.stack.last_mut()
+    }
+
+    fn shift_back(&mut self) -> Menu<'a> {
+        self.pop().unwrap()
     }
 
     fn shift_state(&mut self, menu: Menu<'a>) {
-        self.focus = menu.clone();
         self.push(menu);
     }
+
+    fn base(&self) -> &TextArea {
+        match self.stack.first().unwrap() {
+            Menu::MessageInput(area) => {
+                area
+            }
+            _ => {
+                panic!("Base of stack was not a TextArea!")
+            }
+        }
+    }
+
 }
 
 struct App<'a> {
@@ -206,13 +226,61 @@ struct App<'a> {
     image: Option<ImageWithData>,
     message_channel_receiver: Receiver<Packet>,
     picker: Picker,
-    textarea: Rc<QCell<TextArea<'a>>>,
-    textarea_owner: QCellOwner,
     zoom_x: u16,
     zoom_y: u16,
     state: State<'a>,
-    messages: Rc<QCell<StatefulList<Packet>>>,
-    messages_owner: QCellOwner
+    messages: Option<StatefulList<Packet>>,
+}
+
+impl<'a> App<'a> {
+    /*fn textarea(&self) -> &TextArea {
+        return self.state.base()
+    }
+    fn textarea_mut(&'a mut self) -> &mut TextArea {
+        return self.state.base_mut();
+    }*/
+
+    fn messages_mut(&mut self) -> &mut StatefulList<Packet> {
+        match &mut self.messages {
+            None => {
+                for menu in self.state.stack.iter_mut() {
+                    if let Menu::MessageList(list) = menu {
+                        return list
+                    }
+                }
+            }
+            Some(list) => {
+                return list
+            }
+        }
+        panic!("No message list found!")
+    }
+
+    fn messages(&self) -> &StatefulList<Packet> {
+        match &self.messages {
+            None => {
+                for menu in self.state.stack.iter() {
+                    if let Menu::MessageList(list) = menu {
+                        return list
+                    }
+                }
+            }
+            Some(list) => {
+                return list
+            }
+        }
+        panic!("No message list found!")
+    }
+    /*fn base_mut(&mut self) -> &mut TextArea {
+        match self.state.stack.first_mut().unwrap() {
+            Menu::MessageInput(area) => {
+                area
+            }
+            _ => {
+                panic!("Base of stack was not a TextArea!")
+            }
+        }
+    }*/
 }
 
 impl Drop for App<'_> {
@@ -237,7 +305,7 @@ fn graceful_cleanup(term: &mut Terminal<CrosstermBackend<StdoutLock>>) {
     term.show_cursor().unwrap();
 }
 
-fn exit(app: App) -> ! {
+fn _exit(app: App) -> ! {
     drop(app);
     std::process::exit(0);
 }
@@ -277,11 +345,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         let backend = CrosstermBackend::new(stdout);
         let term = Terminal::new(backend).unwrap();
 
-        let mut textarea_owner = QCellOwner::new();
+        //let mut textarea_owner = QCellOwner::new();
 
-        let textarea = Rc::new(QCell::new(&textarea_owner, TextArea::default()));
+        let mut textarea = TextArea::default();
 
-        textarea.rw(&mut textarea_owner).set_block(
+        textarea.set_block(
             Block::default()
                 .borders(Borders::ALL)
                 .title("Input")
@@ -289,16 +357,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .fg(Color::Blue))
         );
 
-        let messages_owner = QCellOwner::new();
+        //let messages_owner = QCellOwner::new();
 
-        let mut app = App { terminal: term, image: None, message_channel_receiver, picker, textarea: textarea.clone(), textarea_owner,
+        let mut app = App { terminal: term, image: None, message_channel_receiver, picker,
             zoom_x: 35, zoom_y: 35, state: State {
-            stack: vec![Menu::MessageInput(textarea.clone())],
-            focus: Menu::MessageInput(textarea),
+            stack: vec![Menu::MessageInput(textarea)],
                 _cursor_visible: true
         },
-            messages: Rc::new(QCell::new(&messages_owner, StatefulList::with_items(Vec::new()))),
-            messages_owner
+            messages: Some(StatefulList::with_items(Vec::new()))
         };
         loop {
             //todo: is this leaking anything?
@@ -318,12 +384,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
 
-            message_recv(&app.message_channel_receiver, &mut app.messages.rw(&mut app.messages_owner).items,
+            message_recv(&app.message_channel_receiver, &mut app.messages,
                          &mut app.picker, &mut app.image, &mut app.state);
 
-            app.terminal.draw(|f| ui(f, &mut app.messages.rw(&mut app.messages_owner),
-                                     &mut app.image, &mut app.textarea,
-                                     &app.textarea_owner, &app.zoom_x, &app.zoom_y, &app.state
+            //let app_textarea = if let Menu::MessageInput(x) = &mut app.state.stack[0] { x } else { panic!() };
+
+            app.terminal.draw(|f| ui(f, &mut app.messages,
+                                     &app.zoom_x, &app.zoom_y, &mut app.image,&mut app.state
             )).unwrap();
 
 
@@ -335,17 +402,31 @@ fn main() -> Result<(), Box<dyn Error>> {
                     continue;
                 }
             };
-            app = handle_input(inpt, &mut writer, app).await;
+            handle_input(inpt, &mut writer, &mut app).await;
         }
     })
 }
 
 #[allow(clippy::ptr_arg)]
-fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut StatefulList<Packet>,
-                  app_image: &mut Option<ImageWithData>, app_textarea: &mut Rc<QCell<TextArea>>,
-                  app_textarea_owner: &QCellOwner,
-                  app_zoom_x: &u16, app_zoom_y: &u16, app_state: &State)
+fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packet>>,
+                  app_zoom_x: &u16, app_zoom_y: &u16, app_image: &mut Option<ImageWithData>, app_state: &mut State)
 {
+    let messages;
+    match app_messages {
+        None => 'a : {
+            for menu in app_state.stack.iter_mut() {
+                if let Menu::MessageList(list) = menu {
+                    messages = list;
+                    break 'a;
+                }
+            }
+            panic!("No message list found!")
+        }
+        Some(list) => {
+            messages = list
+        }
+    }
+
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -353,7 +434,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut StatefulList<Packet>,
         ])
         .split(f.size());
 
-    let messages: Vec<ListItem> = app_messages.items.iter()
+    let messages_vec: Vec<ListItem> = messages.items.iter()
         .map(|packet| {
             match &packet.message_type {
                 MessageType::STRING => {
@@ -365,7 +446,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut StatefulList<Packet>,
             }.style(Style::default().fg(Color::White).bg(Color::Black))
         }).collect();
 
-    let messages_list = List::new(messages)
+    let messages_list = List::new(messages_vec)
         .block(Block::default().title("Messages").borders(Borders::ALL))
         .highlight_style(
             Style::default()
@@ -374,11 +455,13 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut StatefulList<Packet>,
         )
         .highlight_symbol(">> ");
 
-    f.render_stateful_widget(messages_list,main_layout[0], &mut app_messages.state);
-    f.render_widget(app_textarea.ro(app_textarea_owner).widget(), main_layout[1]);
+    f.render_stateful_widget(messages_list,main_layout[0], &mut messages.state);
 
-    let _u = app_image.clone().map_or(0, |mut img| {
-        if app_state.focus == Menu::ImageView {
+    let app_textarea = if let Menu::MessageInput(x) = &mut app_state.stack[0] { x } else { panic!() };
+    f.render_widget(app_textarea.widget(), main_layout[1]);
+
+    let _u = app_image.as_mut().map_or(0, |img| {
+        if *app_state.focus().unwrap() == Menu::ImageView {
             let img_layout = Block::default().borders(Borders::ALL).title("Image");
             f.render_stateful_widget(ResizeImage::new(None),
                                      img_layout.inner(centered_rect(f.size(), *app_zoom_x, *app_zoom_y)),
@@ -390,31 +473,50 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut StatefulList<Packet>,
 
 }
 
-fn message_recv(app_message_channel_receiver: &Receiver<Packet>, app_messages: &mut Vec<Packet>,
+fn message_recv(app_message_channel_receiver: &Receiver<Packet>, app_messages: &mut Option<StatefulList<Packet>>,
                 app_picker: &mut Picker, app_image: &mut Option<ImageWithData>,
                 app_state: &mut State)
 {
-    let _u = app_message_channel_receiver.recv().now_or_never().map_or(0, |res| {
-        let packet = res.unwrap();
-        match packet.message_type {
-            MessageType::STRING => {
-                //app_lines.push(Line::from(String::from_utf8(packet.data).unwrap()));
+    let messages ;
+    match app_messages {
+        None => 'a : {
+            for menu in app_state.stack.iter_mut() {
+                if let Menu::MessageList(list) = menu {
+                    messages = list;
+                    break 'a;
+                }
             }
-            MessageType::IMAGE(ref imgtype) => {
-                let dyn_img = image::load_from_memory_with_format(packet.data.as_slice(), imgtype.format).unwrap();
-                let image = app_picker.new_state(dyn_img.clone());
-                *app_image = Option::from(ImageWithData {
-                    img: image,
-                    _name: imgtype.name.clone(),
-                    _height: dyn_img.height(),
-                    _width: dyn_img.width(),
-                });
-                app_state.shift_state(Menu::ImageView);
+            panic!("No message list found!")
+        }
+        Some(list) => {
+            messages = list
+        }
+    }
+
+    match app_message_channel_receiver.recv().now_or_never() {
+        None => {}
+        Some(res) => {
+            let packet = res.unwrap();
+            messages.items.push(packet.clone());
+            match messages.items.last().unwrap().message_type {
+                MessageType::STRING => {
+                    //app_lines.push(Line::from(String::from_utf8(packet.data).unwrap()));
+                }
+                MessageType::IMAGE(ref imgtype) => {
+                    let dyn_img = image::load_from_memory_with_format(messages.items.last().unwrap().data.as_slice(), imgtype.format).unwrap();
+                    let image = app_picker.new_state(dyn_img.clone());
+                    *app_image = Option::from(ImageWithData {
+                        img: image,
+                        _name: imgtype.name.clone(),
+                        _height: dyn_img.height(),
+                        _width: dyn_img.width(),
+                    });
+                    app_state.shift_state(Menu::ImageView);
+                }
             }
         }
-        app_messages.push(packet);
-        0
-    });
+    };
+
 }
 
 fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
@@ -438,70 +540,70 @@ fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
 }
 
 /*static handle_input: fn(Input, &mut Arc<Async<TcpStream>>, &mut App) = move*/
-async fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, mut app: App<'a>) -> App<'a> {
-    return match app.state.focus.clone() {
-        Menu::MessageInput(textarea) => {
-            match messages_input(inpt, writer, textarea, &mut app.textarea_owner,
-                                 &mut app.state, app.messages.clone(), &mut app.messages_owner,
-            &mut app.terminal).await
+async fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'a>) {
+    match app.state.focus().unwrap() {
+        Menu::MessageInput(_) => {
+            match messages_input(inpt, writer, app).await
             {
                 Ok(_) => {
-                    app
+                    //app
                 }
                 Err(_) => {
-                    exit(app);
+                    //exit(app)
                 }
             }
         }
         Menu::ImageView => {
             images_input(inpt, &mut app.zoom_x, &mut app.zoom_y, &mut app.state).await;
-            app
+            //app
         }
-        Menu::MessageList(list) => {
-            messages_list_input(inpt, list, &mut app.messages_owner, &mut app.state, &mut app.picker,
-            &mut app.image, app.textarea.clone(), &mut app.textarea_owner).await;
-            app
+        Menu::MessageList(_) => {
+            messages_list_input(inpt, app).await;
+            //app
         }
     }
 }
 
 //todo: does this need to be async?
-async fn messages_list_input(inpt: Input, list: Rc<QCell<StatefulList<Packet>>>, list_owner: &mut QCellOwner,
-                             app_state: &mut State<'_>, app_picker: &mut Picker, app_image: &mut Option<ImageWithData>,
-app_textarea: Rc<QCell<TextArea<'_>>>, app_textarea_owner: &mut QCellOwner)
+async fn messages_list_input(inpt: Input, app: & mut App<'_>)
 {
     match inpt {
         _ if inpt == SHIFT_TO_INPUT => {
-            list.rw(list_owner).unselect();
-            app_textarea.rw(app_textarea_owner).set_block(Block::default()
-                .borders(Borders::ALL)
-                .title("Input")
-                .style(Style::default()
-                    .fg(Color::Blue)));
-            app_state.shift_back();
+            app.messages_mut().unselect();
+            if let Menu::MessageInput(area) = &mut app.state.stack[0] {
+                area.set_block(Block::default()
+                    .borders(Borders::ALL)
+                    .title("Input")
+                    .style(Style::default()
+                        .fg(Color::Blue)));
+            };
+            let _ = std::mem::replace(&mut app.messages, Some(
+                if let Menu::MessageList(list) = app.state.shift_back() { list } else { panic!() }
+            ));
         }
         Input { key: Key::Up, .. } => {
-            list.rw(list_owner).previous();
+            app.messages_mut().previous();
         }
         Input { key: Key::Down, .. } => {
-            list.rw(list_owner).next();
+            app.messages_mut().next();
         }
         _ if inpt == MESSAGE_SELECT => {
-            let packet = list.ro(list_owner).current();
+            let packet = app.messages().current();
             match &packet.message_type {
                 MessageType::STRING => {
 
                 }
                 MessageType::IMAGE(imagedata) => {
+                    let name = imagedata.name.clone();
                     let dyn_img = image::load_from_memory_with_format(packet.data.as_slice(), imagedata.format).unwrap();
-                    let image = app_picker.new_state(dyn_img.clone());
-                    *app_image = Option::from(ImageWithData {
+                    let image = app.picker.new_state(dyn_img.clone());
+                    app.image = Option::from(ImageWithData {
                         img: image,
-                        _name: imagedata.name.clone(),
+                        _name: name,
                         _height: dyn_img.height(),
                         _width: dyn_img.width(),
                     });
-                    app_state.shift_state(Menu::ImageView);
+                    app.state.shift_state(Menu::ImageView);
                 }
             }
         }
@@ -527,7 +629,6 @@ async fn images_input(inpt: Input, app_zoom_x: &mut u16, app_zoom_y: &mut u16, a
         _ if inpt == ESCAPE => {
             /*app_state.pop().unwrap();
             app_state.focus = app_state.current().unwrap().clone();*/
-
             app_state.shift_back();
         }
         _input => {
@@ -536,14 +637,11 @@ async fn images_input(inpt: Input, app_zoom_x: &mut u16, app_zoom_y: &mut u16, a
     }
 }
 
-async fn messages_input<B: Backend>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, text_area: Rc<QCell<TextArea<'_>>>,
-                        text_area_owner: &mut QCellOwner, app_state: &mut State<'_>,
-                        message_list: Rc<QCell<StatefulList<Packet>>>, message_list_owner: &mut QCellOwner,
-                        app_terminal: &mut Terminal<B>) -> Result<(), ()>
+async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'_>) -> Result<(), ()>
 {
     match inpt {
         _ if inpt == SEND => 'a : {
-            let input_lines = text_area.ro(text_area_owner).lines();
+            let input_lines = app.state.base().lines();
             if input_lines == [""] {
                 break 'a;
             }
@@ -581,18 +679,25 @@ async fn messages_input<B: Backend>(inpt: Input, writer: &mut Arc<Async<TcpStrea
             send_with_header(writer, packet).await.unwrap();
         },
         _ if inpt == SHIFT_TO_MESSAGES => {
-            message_list.rw(message_list_owner).state.select(Some(0));
-            text_area.rw(text_area_owner).set_block(Block::default()
-                .borders(Borders::ALL)
-                .title("Input")
-                .style(Style::default()));
-            app_state.shift_state(Menu::MessageList(message_list));
+            app.messages_mut().state.select(Some(0));
+            {
+                if let Menu::MessageInput(area) = &mut app.state.stack[0] {
+                    area.set_block(Block::default()
+                        .borders(Borders::ALL)
+                        .title("Input")
+                        .style(Style::default()));
+                }
+            }
+            let message_list = std::mem::replace(&mut app.messages, None);
+            app.state.shift_state(Menu::MessageList(message_list.unwrap()));
         }
         Input { key : Key::Char('c'), ctrl: true, .. } => {
             return Err(());
         },
         input => {
-            text_area.rw(text_area_owner).input(input);
+            if let Menu::MessageInput(area) = &mut app.state.stack[0] {
+                area.input(input);
+            }
         }
     }
     return Ok(())
