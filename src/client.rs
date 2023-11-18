@@ -128,18 +128,6 @@ impl<'a> PartialEq for Menu<'a> {
     }
 }
 
-/*impl<'a> PartialEq<Menu> for Menu<'a> {
-    fn eq(&self, other: &Menu) -> bool {
-        match other {
-            Menu::MessageInput(_) => {
-                *self == Menu::MessageInput
-            }
-            Menu::ImageView => {}
-            Menu::MessageList(_) => {}
-        }
-    }
-}*/
-
 impl <'a> Debug for Menu<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -179,37 +167,39 @@ mod tests {
 MessageList <----------> ImageView
 */
 struct State<'a> {
-    stack: Vec<Menu<'a>>,
+    stack: Vec<(Menu<'a>, Box<dyn FnOnce(&mut Menu, &mut State)>)>,
     _cursor_visible: bool
 }
 
 impl<'a> State<'a> {
-    fn push(&mut self, m: Menu<'a>) {
-        self.stack.push(m);
+    fn push(&mut self, m: Menu<'a>, handler: Box<dyn FnOnce(&mut Menu, &mut State)>) {
+        self.stack.push((m, handler));
     }
 
-    fn pop(&mut self) -> Option<Menu<'a>> {
+    fn pop(&mut self) -> Option<(Menu<'a>, Box<dyn FnOnce(&mut Menu, &mut State)>)> {
         self.stack.pop()
     }
 
-    fn focus(&self) -> Option<&Menu<'a>> {
-        self.stack.last()
+    fn focus(&self) -> &Menu<'a> {
+        &self.stack.last().unwrap().0
     }
 
-    fn _focus_mut(&mut self) -> Option<&mut Menu<'a>> {
-        self.stack.last_mut()
+    fn _focus_mut(&mut self) -> &mut Menu<'a> {
+        &mut self.stack.last_mut().unwrap().0
+    }
+
+    fn shift_state(&mut self, menu: Menu<'a>, return_logic: impl FnOnce(&mut Menu, &mut State) + 'static) {
+        self.push(menu, Box::new(return_logic));
     }
 
     fn shift_back(&mut self) -> Menu<'a> {
-        self.pop().unwrap()
-    }
-
-    fn shift_state(&mut self, menu: Menu<'a>) {
-        self.push(menu);
+        let mut returned = self.pop().unwrap();
+        returned.1(&mut returned.0, self);
+        returned.0
     }
 
     fn base(&self) -> &TextArea {
-        match self.stack.first().unwrap() {
+        match &self.stack.first().unwrap().0 {
             Menu::MessageInput(area) => {
                 area
             }
@@ -233,18 +223,11 @@ struct App<'a> {
 }
 
 impl<'a> App<'a> {
-    /*fn textarea(&self) -> &TextArea {
-        return self.state.base()
-    }
-    fn textarea_mut(&'a mut self) -> &mut TextArea {
-        return self.state.base_mut();
-    }*/
-
     fn messages_mut(&mut self) -> &mut StatefulList<Packet> {
         match &mut self.messages {
             None => {
                 for menu in self.state.stack.iter_mut() {
-                    if let Menu::MessageList(list) = menu {
+                    if let Menu::MessageList(list) = &mut menu.0 {
                         return list
                     }
                 }
@@ -260,7 +243,7 @@ impl<'a> App<'a> {
         match &self.messages {
             None => {
                 for menu in self.state.stack.iter() {
-                    if let Menu::MessageList(list) = menu {
+                    if let Menu::MessageList(list) = &menu.0 {
                         return list
                     }
                 }
@@ -271,16 +254,6 @@ impl<'a> App<'a> {
         }
         panic!("No message list found!")
     }
-    /*fn base_mut(&mut self) -> &mut TextArea {
-        match self.state.stack.first_mut().unwrap() {
-            Menu::MessageInput(area) => {
-                area
-            }
-            _ => {
-                panic!("Base of stack was not a TextArea!")
-            }
-        }
-    }*/
 }
 
 impl Drop for App<'_> {
@@ -345,8 +318,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         let backend = CrosstermBackend::new(stdout);
         let term = Terminal::new(backend).unwrap();
 
-        //let mut textarea_owner = QCellOwner::new();
-
         let mut textarea = TextArea::default();
 
         textarea.set_block(
@@ -357,11 +328,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .fg(Color::Blue))
         );
 
-        //let messages_owner = QCellOwner::new();
-
         let mut app = App { terminal: term, image: None, message_channel_receiver, picker,
             zoom_x: 35, zoom_y: 35, state: State {
-            stack: vec![Menu::MessageInput(textarea)],
+            stack: vec![(Menu::MessageInput(textarea), Box::new(|_, _| {panic!("Shifted state away from base text area!")}))],
                 _cursor_visible: true
         },
             messages: Some(StatefulList::with_items(Vec::new()))
@@ -386,8 +355,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             message_recv(&app.message_channel_receiver, &mut app.messages,
                          &mut app.picker, &mut app.image, &mut app.state);
-
-            //let app_textarea = if let Menu::MessageInput(x) = &mut app.state.stack[0] { x } else { panic!() };
 
             app.terminal.draw(|f| ui(f, &mut app.messages,
                                      &app.zoom_x, &app.zoom_y, &mut app.image,&mut app.state
@@ -415,7 +382,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
     match app_messages {
         None => 'a : {
             for menu in app_state.stack.iter_mut() {
-                if let Menu::MessageList(list) = menu {
+                if let Menu::MessageList(list) = &mut menu.0 {
                     messages = list;
                     break 'a;
                 }
@@ -457,11 +424,11 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
 
     f.render_stateful_widget(messages_list,main_layout[0], &mut messages.state);
 
-    let app_textarea = if let Menu::MessageInput(x) = &mut app_state.stack[0] { x } else { panic!() };
+    let app_textarea = if let Menu::MessageInput(x) = &mut app_state.stack[0].0 { x } else { panic!() };
     f.render_widget(app_textarea.widget(), main_layout[1]);
 
     let _u = app_image.as_mut().map_or(0, |img| {
-        if *app_state.focus().unwrap() == Menu::ImageView {
+        if *app_state.focus() == Menu::ImageView {
             let img_layout = Block::default().borders(Borders::ALL).title("Image");
             f.render_stateful_widget(ResizeImage::new(None),
                                      img_layout.inner(centered_rect(f.size(), *app_zoom_x, *app_zoom_y)),
@@ -481,7 +448,7 @@ fn message_recv(app_message_channel_receiver: &Receiver<Packet>, app_messages: &
     match app_messages {
         None => 'a : {
             for menu in app_state.stack.iter_mut() {
-                if let Menu::MessageList(list) = menu {
+                if let Menu::MessageList(list) = &mut menu.0 {
                     messages = list;
                     break 'a;
                 }
@@ -500,7 +467,7 @@ fn message_recv(app_message_channel_receiver: &Receiver<Packet>, app_messages: &
             messages.items.push(packet.clone());
             match messages.items.last().unwrap().message_type {
                 MessageType::STRING => {
-                    //app_lines.push(Line::from(String::from_utf8(packet.data).unwrap()));
+
                 }
                 MessageType::IMAGE(ref imgtype) => {
                     let dyn_img = image::load_from_memory_with_format(messages.items.last().unwrap().data.as_slice(), imgtype.format).unwrap();
@@ -511,7 +478,7 @@ fn message_recv(app_message_channel_receiver: &Receiver<Packet>, app_messages: &
                         _height: dyn_img.height(),
                         _width: dyn_img.width(),
                     });
-                    app_state.shift_state(Menu::ImageView);
+                    app_state.shift_state(Menu::ImageView, |_, _| {/* nothing */});
                 }
             }
         }
@@ -539,44 +506,29 @@ fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-/*static handle_input: fn(Input, &mut Arc<Async<TcpStream>>, &mut App) = move*/
 async fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'a>) {
-    match app.state.focus().unwrap() {
+    if inpt.key == Key::Char('c') && inpt.ctrl == true {
+        graceful_cleanup(&mut app.terminal);
+        std::process::exit(0);
+    }
+    match app.state.focus() {
         Menu::MessageInput(_) => {
-            match messages_input(inpt, writer, app).await
-            {
-                Ok(_) => {
-                    //app
-                }
-                Err(_) => {
-                    //exit(app)
-                }
-            }
+            messages_input(inpt, writer, app).await;
         }
         Menu::ImageView => {
             images_input(inpt, &mut app.zoom_x, &mut app.zoom_y, &mut app.state).await;
-            //app
         }
         Menu::MessageList(_) => {
             messages_list_input(inpt, app).await;
-            //app
         }
     }
 }
 
 //todo: does this need to be async?
-async fn messages_list_input(inpt: Input, app: & mut App<'_>)
-{
+async fn messages_list_input(inpt: Input, app: & mut App<'_>) {
     match inpt {
         _ if inpt == SHIFT_TO_INPUT => {
             app.messages_mut().unselect();
-            if let Menu::MessageInput(area) = &mut app.state.stack[0] {
-                area.set_block(Block::default()
-                    .borders(Borders::ALL)
-                    .title("Input")
-                    .style(Style::default()
-                        .fg(Color::Blue)));
-            };
             let _ = std::mem::replace(&mut app.messages, Some(
                 if let Menu::MessageList(list) = app.state.shift_back() { list } else { panic!() }
             ));
@@ -603,7 +555,7 @@ async fn messages_list_input(inpt: Input, app: & mut App<'_>)
                         _height: dyn_img.height(),
                         _width: dyn_img.width(),
                     });
-                    app.state.shift_state(Menu::ImageView);
+                    app.state.shift_state(Menu::ImageView, |_, _| {});
                 }
             }
         }
@@ -627,8 +579,6 @@ async fn images_input(inpt: Input, app_zoom_x: &mut u16, app_zoom_y: &mut u16, a
             }
         },
         _ if inpt == ESCAPE => {
-            /*app_state.pop().unwrap();
-            app_state.focus = app_state.current().unwrap().clone();*/
             app_state.shift_back();
         }
         _input => {
@@ -637,8 +587,7 @@ async fn images_input(inpt: Input, app_zoom_x: &mut u16, app_zoom_y: &mut u16, a
     }
 }
 
-async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'_>) -> Result<(), ()>
-{
+async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'_>) {
     match inpt {
         _ if inpt == SEND => 'a : {
             let input_lines = app.state.base().lines();
@@ -667,7 +616,8 @@ async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &m
                     break 'a;
                 }
                 "/exit" => {
-                    return Err(());
+                    graceful_cleanup(&mut app.terminal);
+                    std::process::exit(0);
                 }
                 _ => {}
             }
@@ -681,7 +631,7 @@ async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &m
         _ if inpt == SHIFT_TO_MESSAGES => {
             app.messages_mut().state.select(Some(0));
             {
-                if let Menu::MessageInput(area) = &mut app.state.stack[0] {
+                if let Menu::MessageInput(area) = &mut app.state.stack[0].0 {
                     area.set_block(Block::default()
                         .borders(Borders::ALL)
                         .title("Input")
@@ -689,17 +639,21 @@ async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &m
                 }
             }
             let message_list = std::mem::replace(&mut app.messages, None);
-            app.state.shift_state(Menu::MessageList(message_list.unwrap()));
-        }
-        Input { key : Key::Char('c'), ctrl: true, .. } => {
-            return Err(());
+            app.state.shift_state(Menu::MessageList(message_list.unwrap()), |_menu, state| {
+                if let Menu::MessageInput(area) = &mut state.stack[0].0 {
+                    area.set_block(Block::default()
+                        .borders(Borders::ALL)
+                        .title("Input")
+                        .style(Style::default()
+                            .fg(Color::Blue)));
+                };
+            });
         },
         input => {
-            if let Menu::MessageInput(area) = &mut app.state.stack[0] {
+            if let Menu::MessageInput(area) = &mut app.state.stack[0].0 {
                 area.input(input);
             }
         }
     }
-    return Ok(())
 }
 
