@@ -41,7 +41,7 @@ use crossterm::execute;
 use ratatui::style::{Color, Modifier, Style};
 use smol::Async;
 
-use crate::common::{MessageType, Packet, PktSource, read_data, ReadResult, send_with_header, ImageData};
+use crate::common::{MessageType, Packet, PktSource, read_data, ReadResult, send_with_header, ImageData, ClientList, Client};
 
 pub mod common;
 
@@ -56,6 +56,7 @@ static _IMAGE_MOVE_DOWN: Input = Input { key: Key::Down, ctrl: false, alt: false
 static SHIFT_TO_MESSAGES: Input = Input { key: Key::Char('<'), ctrl: false, alt: false };
 static SHIFT_TO_INPUT: Input = Input { key: Key::Char('>'), ctrl: false, alt: false };
 static MESSAGE_SELECT: Input = Input { key: Key::Enter, ctrl: false, alt: false };
+static SHIFT_TO_CLIENTS: Input = Input { key: Key::Char('`'), ctrl: false, alt: false};
 const POLL_TIME: Duration = Duration::from_millis(50);
 
 struct StatefulList<T> {
@@ -119,7 +120,8 @@ struct ImageWithData {
 enum Menu<'a> {
     MessageInput(TextArea<'a>),
     ImageView,
-    MessageList(StatefulList<Packet>)
+    MessageList(StatefulList<Packet>),
+    PeerList(StatefulList<Client>)
 }
 
 impl<'a> PartialEq for Menu<'a> {
@@ -139,6 +141,9 @@ impl <'a> Debug for Menu<'a> {
             }
             Menu::MessageList(_) => {
                 write!(f, "Menu::MessageList")
+            }
+            Menu::PeerList(_) => {
+                write!(f, "Menu::PeerList")
             }
         }
     }
@@ -220,6 +225,7 @@ struct App<'a> {
     zoom_y: u16,
     state: State<'a>,
     messages: Option<StatefulList<Packet>>,
+    peers: Option<StatefulList<Client>>,
 }
 
 impl<'a> App<'a> {
@@ -253,6 +259,22 @@ impl<'a> App<'a> {
             }
         }
         panic!("No message list found!")
+    }
+
+    fn peers_mut(&mut self) -> &mut StatefulList<Client> {
+        match &mut self.peers {
+            None => {
+                for menu in self.state.stack.iter_mut() {
+                    if let Menu::PeerList(list) = &mut menu.0 {
+                        return list;
+                    }
+                }
+                panic!("No peer list found!")
+            }
+            Some(list) => {
+                return list;
+            }
+        }
     }
 }
 
@@ -333,7 +355,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             stack: vec![(Menu::MessageInput(textarea), Box::new(|_, _| {panic!("Shifted state away from base text area!")}))],
                 _cursor_visible: true
         },
-            messages: Some(StatefulList::with_items(Vec::new()))
+            messages: Some(StatefulList::with_items(Vec::new())),
+            peers: Some(StatefulList::with_items(Vec::new()))
         };
         loop {
             //todo: is this leaking anything?
@@ -353,11 +376,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
 
-            message_recv(&app.message_channel_receiver, &mut app.messages,
-                         &mut app.picker, &mut app.image, &mut app.state);
+            message_recv(&app.message_channel_receiver, &mut app.messages, &mut app.picker, &mut app.image, &mut app.state, &mut app.peers);
 
             app.terminal.draw(|f| ui(f, &mut app.messages,
-                                     &app.zoom_x, &app.zoom_y, &mut app.image,&mut app.state
+                                     &app.zoom_x, &app.zoom_y, &mut app.image,&mut app.state, &mut app.peers
             )).unwrap();
 
 
@@ -376,8 +398,23 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[allow(clippy::ptr_arg)]
 fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packet>>,
-                  app_zoom_x: &u16, app_zoom_y: &u16, app_image: &mut Option<ImageWithData>, app_state: &mut State)
+                  app_zoom_x: &u16, app_zoom_y: &u16, app_image: &mut Option<ImageWithData>, app_state: &mut State, app_peers: &mut Option<StatefulList<Client>>)
 {
+
+    let main_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(80), Constraint::Percentage(20)
+        ])
+        .split(f.size());
+
+    let top_section = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(80), Constraint::Percentage(20)
+        ])
+        .split(main_layout[0]);
+
     let messages;
     match app_messages {
         None => 'a : {
@@ -394,24 +431,20 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
         }
     }
 
-    let main_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(80), Constraint::Percentage(20)
-        ])
-        .split(f.size());
-
-    let messages_vec: Vec<ListItem> = messages.items.iter()
-        .map(|packet| {
-            match &packet.message_type {
-                MessageType::STRING => {
-                    ListItem::new(String::from_utf8(packet.data.clone()).unwrap())
-                }
-                MessageType::IMAGE(img) => {
-                    ListItem::new(format!("Image of type {:?}, {}", img.format, img.name))
-                }
-            }.style(Style::default().fg(Color::White).bg(Color::Black))
-        }).collect();
+    let mut messages_vec : Vec<ListItem> = Vec::new();
+    for packet in messages.items.iter() {
+        match &packet.message_type {
+            MessageType::STRING => {
+                messages_vec.push(
+                    ListItem::new(String::from_utf8(packet.data.clone()).unwrap()).style(Style::default().fg(Color::White).bg(Color::Black)));
+            }
+            MessageType::IMAGE(img) => {
+                messages_vec.push(
+                    ListItem::new(format!("Image of type {:?}, {}", img.format, img.name)).style(Style::default().fg(Color::White).bg(Color::Black)));
+            }
+            MessageType::CLIENTS => {}
+        }
+    }
 
     let messages_list = List::new(messages_vec)
         .block(Block::default().title("Messages").borders(Borders::ALL))
@@ -422,7 +455,50 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
         )
         .highlight_symbol(">> ");
 
-    f.render_stateful_widget(messages_list,main_layout[0], &mut messages.state);
+    f.render_stateful_widget(messages_list,top_section[0], &mut messages.state);
+
+    let peers;
+    match app_peers {
+        None => 'a : {
+            for menu in app_state.stack.iter_mut() {
+                if let Menu::PeerList(list) = &mut menu.0 {
+                    peers = list;
+                    break 'a;
+                }
+            }
+            panic!("No peer list found!")
+        }
+        Some(list) => {
+            peers = list;
+        }
+    }
+
+    let mut peers_vec : Vec<ListItem> = Vec::new();
+    for peer in peers.items.iter() {
+        peers_vec.push(
+            ListItem::new(peer.addr.to_string()).style(Style::default().fg(Color::White).bg(Color::Black))
+        );
+    }
+
+    let peers_list = List::new(peers_vec)
+        .block(Block::default().title("Peers").borders(Borders::ALL))
+        .highlight_style(
+            Style::default()
+                .bg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+
+    f.render_stateful_widget(peers_list, top_section[1], &mut peers.state);
+
+    /*messages_vec.push(
+        ListItem::new(
+            format!("{:?}",
+                    app_peers.clients.iter().map(|client| {
+                        client.addr.to_string()
+                    }).collect::<Vec<String>>()
+            )
+        ).style(Style::default().fg(Color::White).bg(Color::Black)));*/
 
     let app_textarea = if let Menu::MessageInput(x) = &mut app_state.stack[0].0 { x } else { panic!() };
     f.render_widget(app_textarea.widget(), main_layout[1]);
@@ -442,7 +518,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
 
 fn message_recv(app_message_channel_receiver: &Receiver<Packet>, app_messages: &mut Option<StatefulList<Packet>>,
                 app_picker: &mut Picker, app_image: &mut Option<ImageWithData>,
-                app_state: &mut State)
+                app_state: &mut State, app_peers: &mut Option<StatefulList<Client>>)
 {
     let messages ;
     match app_messages {
@@ -479,6 +555,25 @@ fn message_recv(app_message_channel_receiver: &Receiver<Packet>, app_messages: &
                         _width: dyn_img.width(),
                     });
                     app_state.shift_state(Menu::ImageView, |_, _| {/* nothing */});
+                }
+                MessageType::CLIENTS => {
+                    let peers;
+                    match app_peers {
+                        None => 'a : {
+                            for menu in app_state.stack.iter_mut() {
+                                if let Menu::PeerList(list) = &mut menu.0 {
+                                    peers = list;
+                                    break 'a;
+                                }
+                            }
+                            panic!("No peer list found!")
+                        }
+                        Some(list) => {
+                            peers = list;
+                        }
+                    }
+                    let clients : ClientList = postcard::from_bytes(packet.data.as_slice()).unwrap();
+                    peers.items = clients.clients;
                 }
             }
         }
@@ -521,6 +616,22 @@ async fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: 
         Menu::MessageList(_) => {
             messages_list_input(inpt, app).await;
         }
+        Menu::PeerList(_) => {
+            peer_list_input(inpt, app).await;
+        }
+    }
+}
+
+//todo: does this need to be async?
+async fn peer_list_input(inpt: Input, app: &mut App<'_>) {
+    match inpt {
+        Input { key: Key::Up, .. } => {
+            app.peers_mut().previous();
+        }
+        Input { key: Key::Down, .. } => {
+            app.peers_mut().next();
+        }
+        Input { .. } => {}
     }
 }
 
@@ -557,6 +668,7 @@ async fn messages_list_input(inpt: Input, app: & mut App<'_>) {
                     });
                     app.state.shift_state(Menu::ImageView, |_, _| {});
                 }
+                MessageType::CLIENTS => {}
             }
         }
         Input { .. } => {}
@@ -649,6 +761,27 @@ async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &m
                 };
             });
         },
+        _ if inpt == SHIFT_TO_CLIENTS => {
+            app.peers_mut().state.select(Some(0));
+            {
+                if let Menu::MessageInput(area) = &mut app.state.stack[0].0 {
+                    area.set_block(Block::default()
+                        .borders(Borders::ALL)
+                        .title("Input")
+                        .style(Style::default()));
+                }
+            }
+            let peers_list = std::mem::replace(&mut app.peers, None);
+            app.state.shift_state(Menu::PeerList(peers_list.unwrap()), |_menu, state| {
+                if let Menu::MessageInput(area) = &mut state.stack[0].0 {
+                    area.set_block(Block::default()
+                        .borders(Borders::ALL)
+                        .title("Input")
+                        .style(Style::default()
+                            .fg(Color::Blue)));
+                };
+            })
+        }
         input => {
             if let Menu::MessageInput(area) = &mut app.state.stack[0].0 {
                 area.input(input);

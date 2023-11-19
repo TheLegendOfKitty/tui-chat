@@ -16,7 +16,7 @@ use async_dup::Arc;
 use smol::Async;
 
 pub mod common;
-use crate::common::{Event, Packet, MessageType, PktSource, read_data, ReadResult, send_with_header};
+use crate::common::{Event, Packet, MessageType, PktSource, read_data, ReadResult, send_with_header, ClientList, Client};
 
 async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
     panic::set_hook(Box::new(|panic_info| {
@@ -30,6 +30,23 @@ async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
         let packet = match event {
             Event::Join(addr, stream) => {
                 map.insert(addr, stream);
+
+                let mut clients_list = ClientList {
+                    clients: Vec::new()
+                };
+                for key in map.keys() {
+                    clients_list.clients.push(Client { addr: *key })
+                }
+                let packet = Packet {
+                    src: PktSource::SERVER,
+                    message_type: MessageType::CLIENTS,
+                    data: postcard::to_allocvec(&clients_list).unwrap(),
+                };
+                for stream in map.values_mut() {
+                    // Ignore errors because the client might disconnect at any point.
+                    send_with_header(stream, packet.clone()).await.ok();
+                }
+
                 Packet {
                     src: PktSource::SERVER,
                     message_type: MessageType::STRING,
@@ -38,6 +55,23 @@ async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
             }
             Event::Leave(addr) => {
                 map.remove(&addr);
+
+                let mut clients_list = ClientList {
+                    clients: Vec::new()
+                };
+                for key in map.keys() {
+                    clients_list.clients.push(Client { addr: *key })
+                }
+                let packet = Packet {
+                    src: PktSource::SERVER,
+                    message_type: MessageType::CLIENTS,
+                    data: postcard::to_allocvec(&clients_list).unwrap(),
+                };
+                for stream in map.values_mut() {
+                    // Ignore errors because the client might disconnect at any point.
+                    send_with_header(stream, packet.clone()).await.ok();
+                }
+
                 Packet {
                     src: PktSource::SERVER,
                     message_type: MessageType::STRING,
@@ -47,6 +81,10 @@ async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
             Event::Message(addr, mut packet) => {
                 //clients should not be able to spoof the source
                 packet.src = PktSource::CLIENT(addr);
+                //clients should not be able to send client list packets
+                if packet.message_type == MessageType::CLIENTS {
+                    continue;
+                }
                 packet
             }
         };

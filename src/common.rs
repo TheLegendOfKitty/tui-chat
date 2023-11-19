@@ -54,7 +54,18 @@ pub struct ImageData {
 #[derive(Clone)]
 pub enum MessageType {
     STRING,
-    IMAGE(ImageData)
+    IMAGE(ImageData),
+    CLIENTS
+}
+
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+pub struct Client {
+    pub addr: SocketAddr
+}
+
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+pub struct ClientList {
+    pub clients: Vec<Client>
 }
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
@@ -84,8 +95,9 @@ pub async fn send_with_header(writer: &mut Arc<Async<TcpStream>>, packet: Packet
     let encoded = to_allocvec(&packet).unwrap();
     //todo: no need to multiply by size_of::<u8>?
     let size : u32 = u32::try_from(encoded.len() * size_of::<u8>()).unwrap();
+    let size_bytes = size.to_be_bytes();
 
-    match writer.write(&size.to_be_bytes()).await {
+    match writer.write(&size_bytes).await {
         Ok(_) => {}
         Err(err) => {
             return Err(err);
@@ -116,7 +128,14 @@ pub async fn read_data(reader: &mut BufReader<Arc<Async<TcpStream>>>) -> io::Res
             //todo: client can send bad data and crash server
             let (header, data_bytes) = bytes_read.split_at(size_of::<u32>());
 
-            let remaining_size = u32::from_be_bytes(header.try_into().unwrap()) - u32::try_from(data_bytes.len()).unwrap();
+            let remaining = u32::from_be_bytes(header.try_into().unwrap());
+            let read = u32::try_from(data_bytes.len()).unwrap();
+            if remaining < read {
+                let final_buf : Vec<u8> = data_bytes[..usize::try_from(remaining).unwrap()].to_vec();
+                reader.consume(final_buf.len() + size_of::<u32>());
+                return Ok(SUCCESS(final_buf))
+            }
+            let remaining_size = remaining - read;
             if remaining_size != 0 {
                 let mut remaining_buf = Vec::new();
                 remaining_buf.resize(usize::try_from(remaining_size).unwrap(), 0);

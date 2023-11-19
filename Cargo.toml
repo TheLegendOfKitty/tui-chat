@@ -39,7 +39,7 @@ name = "client"
 path = "src/client.rs"
 
 [features]
-default = ["protocol_auto"]
+default = ["ide"]
 protocol_auto = []
 protocol_halfblocks = []
 ide = ["protocol_halfblocks"]
