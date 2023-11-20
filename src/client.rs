@@ -45,18 +45,17 @@ use crate::common::{MessageType, Packet, PktSource, read_data, ReadResult, send_
 
 pub mod common;
 
-static ESCAPE: Input = Input { key: Key::Char('x'), ctrl: false, alt: false };
-static SEND: Input = Input { key: Key::Char('x'), ctrl: false, alt: false };
-static IMAGE_ZOOM_IN: Input = Input { key : Key::Char('+'), /*ctrl: true,*/ ctrl: false, alt: false };
-static IMAGE_ZOOM_OUT: Input = Input { key : Key::Char('-'), /*ctrl: true,*/ ctrl: false, alt: false };
-static _IMAGE_MOVE_LEFT: Input = Input { key: Key::Left, ctrl: false, alt: false };
-static _IMAGE_MOVE_RIGHT: Input = Input { key: Key::Right, ctrl: false, alt:false };
-static _IMAGE_MOVE_UP: Input = Input { key: Key::Up, ctrl: false, alt: false };
-static _IMAGE_MOVE_DOWN: Input = Input { key: Key::Down, ctrl: false, alt: false };
-static SHIFT_TO_MESSAGES: Input = Input { key: Key::Char('<'), ctrl: false, alt: false };
-static SHIFT_TO_INPUT: Input = Input { key: Key::Char('>'), ctrl: false, alt: false };
-static MESSAGE_SELECT: Input = Input { key: Key::Enter, ctrl: false, alt: false };
-static SHIFT_TO_CLIENTS: Input = Input { key: Key::Char('`'), ctrl: false, alt: false};
+const SEND: Input = Input { key: Key::Char('x'), ctrl: false, alt: false };
+const IMAGE_ZOOM_IN: Input = Input { key : Key::Char('+'), /*ctrl: true,*/ ctrl: false, alt: false };
+const IMAGE_ZOOM_OUT: Input = Input { key : Key::Char('-'), /*ctrl: true,*/ ctrl: false, alt: false };
+const _IMAGE_MOVE_LEFT: Input = Input { key: Key::Left, ctrl: false, alt: false };
+const _IMAGE_MOVE_RIGHT: Input = Input { key: Key::Right, ctrl: false, alt:false };
+const _IMAGE_MOVE_UP: Input = Input { key: Key::Up, ctrl: false, alt: false };
+const _IMAGE_MOVE_DOWN: Input = Input { key: Key::Down, ctrl: false, alt: false };
+const SHIFT_BACK: Input = Input { key: Key::Char('<'), ctrl: false, alt: false };
+const MESSAGE_SELECT: Input = Input { key: Key::Enter, ctrl: false, alt: false };
+const SHIFT_TO_PEERS: Input = Input { key: Key::Char('p'), ctrl: false, alt: false};
+const SHIFT_TO_MESSAGES_LIST : Input = Input { key: Key::Char('l'), ctrl: false, alt: false };
 const POLL_TIME: Duration = Duration::from_millis(50);
 
 struct StatefulList<T> {
@@ -625,6 +624,12 @@ async fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: 
 //todo: does this need to be async?
 async fn peer_list_input(inpt: Input, app: &mut App<'_>) {
     match inpt {
+        _ if inpt == SHIFT_BACK => {
+            app.peers_mut().unselect();
+            let _ = std::mem::replace(&mut app.peers, Some(
+                if let Menu::PeerList(list) = app.state.shift_back() { list } else { panic!() }
+            ));
+        }
         Input { key: Key::Up, .. } => {
             app.peers_mut().previous();
         }
@@ -638,7 +643,7 @@ async fn peer_list_input(inpt: Input, app: &mut App<'_>) {
 //todo: does this need to be async?
 async fn messages_list_input(inpt: Input, app: & mut App<'_>) {
     match inpt {
-        _ if inpt == SHIFT_TO_INPUT => {
+        _ if inpt == SHIFT_BACK => {
             app.messages_mut().unselect();
             let _ = std::mem::replace(&mut app.messages, Some(
                 if let Menu::MessageList(list) = app.state.shift_back() { list } else { panic!() }
@@ -690,7 +695,7 @@ async fn images_input(inpt: Input, app_zoom_x: &mut u16, app_zoom_y: &mut u16, a
                 *app_zoom_y -= 5;
             }
         },
-        _ if inpt == ESCAPE => {
+        _ if inpt == SHIFT_BACK => {
             app_state.shift_back();
         }
         _input => {
@@ -740,7 +745,7 @@ async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &m
             };
             send_with_header(writer, packet).await.unwrap();
         },
-        _ if inpt == SHIFT_TO_MESSAGES => {
+        _ if inpt == SHIFT_TO_MESSAGES_LIST => {
             app.messages_mut().state.select(Some(0));
             {
                 if let Menu::MessageInput(area) = &mut app.state.stack[0].0 {
@@ -761,7 +766,7 @@ async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &m
                 };
             });
         },
-        _ if inpt == SHIFT_TO_CLIENTS => {
+        _ if inpt == SHIFT_TO_PEERS => {
             app.peers_mut().state.select(Some(0));
             {
                 if let Menu::MessageInput(area) = &mut app.state.stack[0].0 {
