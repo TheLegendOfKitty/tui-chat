@@ -35,13 +35,13 @@ use std::panic;
 use core::time::Duration;
 use std::fmt::{Debug, Formatter};
 use std::ops::{Deref};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use async_dup::Arc;
 use crossterm::execute;
 use ratatui::style::{Color, Modifier, Style};
 use smol::Async;
 
-use crate::common::{MessageType, Packet, PktSource, read_data, ReadResult, send_with_header, ImageData, ClientList, Client};
+use crate::common::{MessageType, Packet, PktSource, read_data, ReadResult, send_with_header, ClientList, Client};
 
 pub mod common;
 
@@ -54,8 +54,8 @@ const _IMAGE_MOVE_UP: Input = Input { key: Key::Up, ctrl: false, alt: false };
 const _IMAGE_MOVE_DOWN: Input = Input { key: Key::Down, ctrl: false, alt: false };
 const SHIFT_BACK: Input = Input { key: Key::Char('<'), ctrl: false, alt: false };
 const MESSAGE_SELECT: Input = Input { key: Key::Enter, ctrl: false, alt: false };
-const SHIFT_TO_PEERS: Input = Input { key: Key::Char('p'), ctrl: false, alt: false};
-const SHIFT_TO_MESSAGES_LIST : Input = Input { key: Key::Char('l'), ctrl: false, alt: false };
+const SHIFT_TO_PEERS: Input = Input { key: Key::Char('P'), ctrl: false, alt: false};
+const SHIFT_TO_MESSAGES_LIST : Input = Input { key: Key::Char('L'), ctrl: false, alt: false };
 const POLL_TIME: Duration = Duration::from_millis(50);
 
 struct StatefulList<T> {
@@ -116,11 +116,17 @@ struct ImageWithData {
     _width: u32
 }
 
+struct FileBrowser {
+    current_dir_list: StatefulList<PathBuf>,
+    current_dir: PathBuf
+}
+
 enum Menu<'a> {
     MessageInput(TextArea<'a>),
     ImageView,
     MessageList(StatefulList<Packet>),
-    PeerList(StatefulList<Client>)
+    PeerList(StatefulList<Client>),
+    FileBrowser(FileBrowser)
 }
 
 impl<'a> PartialEq for Menu<'a> {
@@ -143,6 +149,9 @@ impl <'a> Debug for Menu<'a> {
             }
             Menu::PeerList(_) => {
                 write!(f, "Menu::PeerList")
+            }
+            Menu::FileBrowser(_) => {
+                write!(f, "Menu::FileBrowser")
             }
         }
     }
@@ -213,6 +222,15 @@ impl<'a> State<'a> {
         }
     }
 
+    fn file_browser_mut(&mut self) -> Option<&mut FileBrowser> {
+        for menu in self.stack.iter_mut() {
+            if let Menu::FileBrowser(filebrowser) = &mut menu.0 {
+                return Some(filebrowser)
+            }
+        }
+        return None;
+    }
+
 }
 
 struct App<'a> {
@@ -224,7 +242,7 @@ struct App<'a> {
     zoom_y: u16,
     state: State<'a>,
     messages: Option<StatefulList<Packet>>,
-    peers: Option<StatefulList<Client>>,
+    peers: Option<StatefulList<Client>>
 }
 
 impl<'a> App<'a> {
@@ -399,6 +417,56 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packet>>,
                   app_zoom_x: &u16, app_zoom_y: &u16, app_image: &mut Option<ImageWithData>, app_state: &mut State, app_peers: &mut Option<StatefulList<Client>>)
 {
+
+    match app_state.file_browser_mut() {
+        Some(browser) => {
+            let layout = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(50), Constraint::Percentage(50)
+                ])
+                .split(f.size());
+
+
+            let current_list = List::new(
+                browser.current_dir_list.items.iter().map(|entry| {
+                        ListItem::new(entry.clone().into_os_string().into_string().unwrap()).style(Style::default().fg(Color::White).bg(Color::Black))
+                      }).collect::<Vec<ListItem>>()
+            )
+                .block(Block::default().title(browser.current_dir.to_str().unwrap()).borders(Borders::ALL))
+                .style(Style::default())
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::LightGreen)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol(">> ");
+
+            f.render_stateful_widget(current_list, layout[0], &mut browser.current_dir_list.state);
+
+            /*
+            let previous_list = List::new(
+                browser.previous_dir_list.items.iter().map(|entry| {
+                    ListItem::new(entry.clone().into_os_string().into_string().unwrap()).style(Style::default().fg(Color::White).bg(Color::Black))
+                }).collect::<Vec<ListItem>>()
+            )
+                .block(Block::default().title(browser.previous_dir.to_str().unwrap()).borders(Borders::ALL))
+                .style(Style::default())
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::LightGreen)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol(">> ");
+
+            f.render_stateful_widget(previous_list, layout[0], &mut browser.previous_dir_list.state);*/
+
+            return;
+        }
+        None => {
+
+        }
+    };
 
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -618,6 +686,52 @@ async fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: 
         Menu::PeerList(_) => {
             peer_list_input(inpt, app).await;
         }
+        Menu::FileBrowser(_) => {
+            file_browser_input(inpt, app).await;
+        }
+    }
+}
+
+//todo: does this need to be async?
+async fn file_browser_input(inpt: Input, app: &mut App<'_>) {
+    match inpt {
+        _ if inpt == SHIFT_BACK => {
+            app.state.file_browser_mut().unwrap().current_dir_list.unselect();
+            app.state.shift_back();
+        }
+        Input { key: Key::Up, .. } => {
+            app.state.file_browser_mut().unwrap().current_dir_list.previous();
+        }
+        Input { key: Key::Down, .. } => {
+            app.state.file_browser_mut().unwrap().current_dir_list.next();
+        }
+        Input { key: Key::Left, .. } => {
+            let current_dir = app.state.file_browser_mut().unwrap().current_dir.clone();
+            if Some(Path::new("")) == current_dir.parent() || None == current_dir.parent() {
+                return;
+            }
+            else {
+                let _u = std::mem::replace(&mut app.state.file_browser_mut().unwrap().current_dir, PathBuf::from(current_dir.parent().unwrap()));
+                app.state.file_browser_mut().unwrap().current_dir_list = StatefulList::with_items(
+                    fs::read_dir(app.state.file_browser_mut().unwrap().current_dir.clone()).unwrap().into_iter().map(|entry| {
+                        entry.unwrap().path()
+                    }).collect());
+                app.state.file_browser_mut().unwrap().current_dir_list.state.select(Some(0));
+            }
+        }
+        Input { key: Key::Right, .. } => {
+            let selected = app.state.file_browser_mut().unwrap().current_dir_list.current().clone();
+            if selected.is_dir() {
+                //let current = app.state.file_browser_mut().unwrap().current_dir.clone();
+                let _u = std::mem::replace(&mut app.state.file_browser_mut().unwrap().current_dir, selected);
+                app.state.file_browser_mut().unwrap().current_dir_list = StatefulList::with_items(
+                    fs::read_dir(app.state.file_browser_mut().unwrap().current_dir.clone()).unwrap().into_iter().map(|entry| {
+                        entry.unwrap().path()
+                    }).collect());
+                app.state.file_browser_mut().unwrap().current_dir_list.state.select(Some(0));
+            }
+        }
+        Input { .. } => {}
     }
 }
 
@@ -715,7 +829,26 @@ async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &m
             match input_lines.first().unwrap().deref()
                 .split(' ').collect::<Vec<&str>>().first().unwrap().deref() {
                 "/file" => {
-                    let path = Path::new(input_lines[0].split(' ').collect::<Vec<&str>>()[1]);
+                    if let Menu::MessageInput(area) = &mut app.state.stack[0].0 {
+                        area.set_block(Block::default()
+                            .borders(Borders::ALL)
+                            .title("Input")
+                            .style(Style::default()));
+                    }
+                    /*let previous_menu = StatefulList::with_items(fs::read_dir(home::home_dir().unwrap()).unwrap().into_iter().map(|entry| {
+                        entry.unwrap().path()
+                    }).collect());*/
+                    let mut current_path = home::home_dir().unwrap();
+                    current_path.push("Documents");
+                    let mut current_menu = StatefulList::with_items(fs::read_dir(current_path.clone()).unwrap().into_iter().map(|entry| {
+                        entry.unwrap().path()
+                    }).collect());
+                    current_menu.state.select(Some(0));
+                    app.state.shift_state(Menu::FileBrowser(FileBrowser {
+                        current_dir_list: current_menu,
+                        current_dir: current_path,
+                    }), |_, _| {});
+                    /*let path = Path::new(input_lines[0].split(' ').collect::<Vec<&str>>()[1]);
                     let name : String = path.file_name()
                         .map(|name| name.to_string_lossy().into_owned())
                         .unwrap();
@@ -730,20 +863,21 @@ async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &m
                         data: raw,
                     };
                     send_with_header(writer, packet).await.unwrap();
-                    break 'a;
+                    break 'a;*/
                 }
                 "/exit" => {
                     graceful_cleanup(&mut app.terminal);
                     std::process::exit(0);
                 }
-                _ => {}
+                _ => {
+                    let packet = Packet {
+                        src: PktSource::UNDEFINED,
+                        message_type: MessageType::STRING,
+                        data: Vec::from(input_lines.join("\n"))
+                    };
+                    send_with_header(writer, packet).await.unwrap();
+                }
             }
-            let packet = Packet {
-                src: PktSource::UNDEFINED,
-                message_type: MessageType::STRING,
-                data: Vec::from(input_lines.join("\n"))
-            };
-            send_with_header(writer, packet).await.unwrap();
         },
         _ if inpt == SHIFT_TO_MESSAGES_LIST => {
             app.messages_mut().state.select(Some(0));
