@@ -14,7 +14,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::{Backend, CrosstermBackend};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Widget, Wrap};
 use ratatui::{Frame, Terminal};
 use tui_textarea::{Input, Key, TextArea};
 
@@ -38,10 +38,11 @@ use std::ops::{Deref};
 use std::path::{Path, PathBuf};
 use async_dup::Arc;
 use crossterm::execute;
+use file_format::FileFormat;
 use ratatui::style::{Color, Modifier, Style};
 use smol::Async;
 
-use crate::common::{MessageType, Packet, PktSource, read_data, ReadResult, send_with_header, ClientList, Client};
+use crate::common::{MessageType, Packet, PktSource, read_data, ReadResult, send_with_header, ClientList, Client, ImageData};
 
 pub mod common;
 
@@ -121,12 +122,17 @@ struct FileBrowser {
     current_dir: PathBuf
 }
 
+struct Popup {
+    title: String,
+    content: String
+}
 enum Menu<'a> {
     MessageInput(TextArea<'a>),
     ImageView,
     MessageList(StatefulList<Packet>),
     PeerList(StatefulList<Client>),
-    FileBrowser(FileBrowser)
+    FileBrowser(FileBrowser),
+    Popup(Popup)
 }
 
 impl<'a> PartialEq for Menu<'a> {
@@ -152,6 +158,9 @@ impl <'a> Debug for Menu<'a> {
             }
             Menu::FileBrowser(_) => {
                 write!(f, "Menu::FileBrowser")
+            }
+            Menu::Popup(_) => {
+                write!(f, "Menu::Popup")
             }
         }
     }
@@ -423,7 +432,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
             let layout = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
-                    Constraint::Percentage(50), Constraint::Percentage(50)
+                    Constraint::Percentage(70), Constraint::Percentage(30)
                 ])
                 .split(f.size());
 
@@ -444,14 +453,96 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
 
             f.render_stateful_widget(current_list, layout[0], &mut browser.current_dir_list.state);
 
-            /*
-            let previous_list = List::new(
-                browser.previous_dir_list.items.iter().map(|entry| {
-                    ListItem::new(entry.clone().into_os_string().into_string().unwrap()).style(Style::default().fg(Color::White).bg(Color::Black))
-                }).collect::<Vec<ListItem>>()
-            )
-                .block(Block::default().title(browser.previous_dir.to_str().unwrap()).borders(Borders::ALL))
-                .style(Style::default())
+            let right_section = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(10), Constraint::Percentage(30), Constraint::Percentage(60)
+                ])
+                .split(layout[1]);
+
+            let top_right_section = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(25), Constraint::Percentage(50), Constraint::Percentage(25)
+                ])
+                .split(right_section[1]);
+
+            let b = Block::default()
+                .title("          ")
+                .borders(Borders::ALL);
+
+            f.render_widget(b, top_right_section[1]);
+
+            let current_file = browser.current_dir_list.current();
+
+            let mut paragraph = Paragraph::default();
+            if current_file.is_dir() {
+                paragraph = Paragraph::new("Directory");
+            }
+            else if current_file.is_symlink() {
+                paragraph = Paragraph::new(format!("Symlink to {}", fs::read_link(current_file).unwrap().into_os_string().into_string().unwrap()));
+            }
+            else if current_file.is_file() {
+                let format = FileFormat::from_file(current_file).unwrap();
+
+                paragraph = Paragraph::new(format.to_string());
+                //let metadata = fs::metadata(current_file).unwrap();
+                //metadata.file_type()
+            }
+            else {
+                //panic!("{}", current_file.clone().into_os_string().into_string().unwrap());
+            }
+            f.render_widget(paragraph,
+                            right_section[0]);
+        }
+        None => {
+            let main_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(80), Constraint::Percentage(20)
+                ])
+                .split(f.size());
+
+            let top_section = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(80), Constraint::Percentage(20)
+                ])
+                .split(main_layout[0]);
+
+            let messages;
+            match app_messages {
+                None => 'a : {
+                    for menu in app_state.stack.iter_mut() {
+                        if let Menu::MessageList(list) = &mut menu.0 {
+                            messages = list;
+                            break 'a;
+                        }
+                    }
+                    panic!("No message list found!")
+                }
+                Some(list) => {
+                    messages = list
+                }
+            }
+
+            let mut messages_vec : Vec<ListItem> = Vec::new();
+            for packet in messages.items.iter() {
+                match &packet.message_type {
+                    MessageType::STRING => {
+                        messages_vec.push(
+                            ListItem::new(String::from_utf8(packet.data.clone()).unwrap()).style(Style::default().fg(Color::White).bg(Color::Black)));
+                    }
+                    MessageType::IMAGE(img) => {
+                        messages_vec.push(
+                            ListItem::new(format!("Image of type {:?}, {}", img.format, img.name)).style(Style::default().fg(Color::White).bg(Color::Black)));
+                    }
+                    MessageType::CLIENTS => {}
+                }
+            }
+
+            let messages_list = List::new(messages_vec)
+                .block(Block::default().title("Messages").borders(Borders::ALL))
                 .highlight_style(
                     Style::default()
                         .bg(Color::LightGreen)
@@ -459,127 +550,71 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
                 )
                 .highlight_symbol(">> ");
 
-            f.render_stateful_widget(previous_list, layout[0], &mut browser.previous_dir_list.state);*/
+            f.render_stateful_widget(messages_list,top_section[0], &mut messages.state);
 
-            return;
-        }
-        None => {
+            let peers;
+            match app_peers {
+                None => 'a : {
+                    for menu in app_state.stack.iter_mut() {
+                        if let Menu::PeerList(list) = &mut menu.0 {
+                            peers = list;
+                            break 'a;
+                        }
+                    }
+                    panic!("No peer list found!")
+                }
+                Some(list) => {
+                    peers = list;
+                }
+            }
 
+            let mut peers_vec : Vec<ListItem> = Vec::new();
+            for peer in peers.items.iter() {
+                peers_vec.push(
+                    ListItem::new(peer.addr.to_string()).style(Style::default().fg(Color::White).bg(Color::Black))
+                );
+            }
+
+            let peers_list = List::new(peers_vec)
+                .block(Block::default().title("Peers").borders(Borders::ALL))
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::LightGreen)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol(">> ");
+
+            f.render_stateful_widget(peers_list, top_section[1], &mut peers.state);
+
+            /*messages_vec.push(
+                ListItem::new(
+                    format!("{:?}",
+                            app_peers.clients.iter().map(|client| {
+                                client.addr.to_string()
+                            }).collect::<Vec<String>>()
+                    )
+                ).style(Style::default().fg(Color::White).bg(Color::Black)));*/
+
+            let app_textarea = if let Menu::MessageInput(x) = &mut app_state.stack[0].0 { x } else { panic!() };
+            f.render_widget(app_textarea.widget(), main_layout[1]);
+
+            let _u = app_image.as_mut().map_or(0, |img| {
+                if *app_state.focus() == Menu::ImageView {
+                    let img_layout = Block::default().borders(Borders::ALL).title("Image");
+                    f.render_stateful_widget(ResizeImage::new(None),
+                                             img_layout.inner(centered_rect(f.size(), *app_zoom_x, *app_zoom_y)),
+                                             &mut img.img);
+                    f.render_widget(img_layout, centered_rect(f.size(), *app_zoom_x, *app_zoom_y));
+                }
+                0
+            });
         }
     };
-
-    let main_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(80), Constraint::Percentage(20)
-        ])
-        .split(f.size());
-
-    let top_section = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(80), Constraint::Percentage(20)
-        ])
-        .split(main_layout[0]);
-
-    let messages;
-    match app_messages {
-        None => 'a : {
-            for menu in app_state.stack.iter_mut() {
-                if let Menu::MessageList(list) = &mut menu.0 {
-                    messages = list;
-                    break 'a;
-                }
-            }
-            panic!("No message list found!")
-        }
-        Some(list) => {
-            messages = list
-        }
+    if let Menu::Popup(p) = app_state.focus() {
+        f.render_widget(Paragraph::new(p.content.deref())
+                            .wrap(Wrap {trim: false})
+                            .block(Block::default().title(p.title.deref()).borders(Borders::ALL)), centered_rect(f.size(), 35, 35));
     }
-
-    let mut messages_vec : Vec<ListItem> = Vec::new();
-    for packet in messages.items.iter() {
-        match &packet.message_type {
-            MessageType::STRING => {
-                messages_vec.push(
-                    ListItem::new(String::from_utf8(packet.data.clone()).unwrap()).style(Style::default().fg(Color::White).bg(Color::Black)));
-            }
-            MessageType::IMAGE(img) => {
-                messages_vec.push(
-                    ListItem::new(format!("Image of type {:?}, {}", img.format, img.name)).style(Style::default().fg(Color::White).bg(Color::Black)));
-            }
-            MessageType::CLIENTS => {}
-        }
-    }
-
-    let messages_list = List::new(messages_vec)
-        .block(Block::default().title("Messages").borders(Borders::ALL))
-        .highlight_style(
-            Style::default()
-                .bg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(">> ");
-
-    f.render_stateful_widget(messages_list,top_section[0], &mut messages.state);
-
-    let peers;
-    match app_peers {
-        None => 'a : {
-            for menu in app_state.stack.iter_mut() {
-                if let Menu::PeerList(list) = &mut menu.0 {
-                    peers = list;
-                    break 'a;
-                }
-            }
-            panic!("No peer list found!")
-        }
-        Some(list) => {
-            peers = list;
-        }
-    }
-
-    let mut peers_vec : Vec<ListItem> = Vec::new();
-    for peer in peers.items.iter() {
-        peers_vec.push(
-            ListItem::new(peer.addr.to_string()).style(Style::default().fg(Color::White).bg(Color::Black))
-        );
-    }
-
-    let peers_list = List::new(peers_vec)
-        .block(Block::default().title("Peers").borders(Borders::ALL))
-        .highlight_style(
-            Style::default()
-                .bg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(">> ");
-
-    f.render_stateful_widget(peers_list, top_section[1], &mut peers.state);
-
-    /*messages_vec.push(
-        ListItem::new(
-            format!("{:?}",
-                    app_peers.clients.iter().map(|client| {
-                        client.addr.to_string()
-                    }).collect::<Vec<String>>()
-            )
-        ).style(Style::default().fg(Color::White).bg(Color::Black)));*/
-
-    let app_textarea = if let Menu::MessageInput(x) = &mut app_state.stack[0].0 { x } else { panic!() };
-    f.render_widget(app_textarea.widget(), main_layout[1]);
-
-    let _u = app_image.as_mut().map_or(0, |img| {
-        if *app_state.focus() == Menu::ImageView {
-            let img_layout = Block::default().borders(Borders::ALL).title("Image");
-            f.render_stateful_widget(ResizeImage::new(None),
-                                     img_layout.inner(centered_rect(f.size(), *app_zoom_x, *app_zoom_y)),
-                                     &mut img.img);
-            f.render_widget(img_layout, centered_rect(f.size(), *app_zoom_x, *app_zoom_y));
-        }
-        0
-    });
 
 }
 
@@ -687,13 +722,26 @@ async fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: 
             peer_list_input(inpt, app).await;
         }
         Menu::FileBrowser(_) => {
-            file_browser_input(inpt, app).await;
+            file_browser_input(inpt, writer, app).await;
+        }
+        Menu::Popup(_) => {
+            popup_input(inpt, app).await;
         }
     }
 }
 
 //todo: does this need to be async?
-async fn file_browser_input(inpt: Input, app: &mut App<'_>) {
+async fn popup_input(inpt: Input, app: &mut App<'_>) {
+    match inpt {
+        _ if inpt == SHIFT_BACK => {
+            app.state.shift_back();
+        }
+        _ => {}
+    }
+}
+
+//todo: does this need to be async?
+async fn file_browser_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'_>) {
     match inpt {
         _ if inpt == SHIFT_BACK => {
             app.state.file_browser_mut().unwrap().current_dir_list.unselect();
@@ -722,6 +770,15 @@ async fn file_browser_input(inpt: Input, app: &mut App<'_>) {
         Input { key: Key::Right, .. } => {
             let selected = app.state.file_browser_mut().unwrap().current_dir_list.current().clone();
             if selected.is_dir() {
+                if let Err(_) = fs::read_dir(selected.clone().clone()) {
+                    app.state.shift_state(Menu::Popup(
+                        Popup {
+                            title: "".to_string(),
+                            content: "You don't have permission to access this directory!".to_string(),
+                        }
+                    ), |_, _| {});
+                    return;
+                }
                 //let current = app.state.file_browser_mut().unwrap().current_dir.clone();
                 let _u = std::mem::replace(&mut app.state.file_browser_mut().unwrap().current_dir, selected);
                 app.state.file_browser_mut().unwrap().current_dir_list = StatefulList::with_items(
@@ -730,6 +787,24 @@ async fn file_browser_input(inpt: Input, app: &mut App<'_>) {
                     }).collect());
                 app.state.file_browser_mut().unwrap().current_dir_list.state.select(Some(0));
             }
+        }
+        Input { key: Key::Enter, .. } => {
+            let path = app.state.file_browser_mut().unwrap().current_dir_list.current().as_path();
+            let name : String = path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap();
+            let raw = fs::read(path).unwrap();
+            let format = image::guess_format(raw.as_slice()).unwrap();
+            //guess_format does not verify validity of the entire memory - for now, we'll load the image into memory to verify its validity
+            let _dyn_img = image::load_from_memory_with_format(raw.as_slice(), format).unwrap();
+            let packet = Packet {
+                src: PktSource::UNDEFINED,
+                message_type: MessageType::IMAGE(ImageData {
+                    format, name}),
+                data: raw,
+            };
+            send_with_header(writer, packet).await.unwrap();
+            app.state.shift_back();
         }
         Input { .. } => {}
     }
