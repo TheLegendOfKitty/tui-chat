@@ -137,8 +137,7 @@ pub async fn read_data(reader: &mut BufReader<Arc<Async<TcpStream>>>) -> io::Res
             }
             let remaining_size = remaining - read;
             if remaining_size != 0 {
-                let mut remaining_buf = Vec::new();
-                remaining_buf.resize(usize::try_from(remaining_size).unwrap(), 0);
+                let mut remaining_buf = vec![0; usize::try_from(remaining_size).unwrap()];
 
                 let mut final_buf = Vec::from(data_bytes);
 

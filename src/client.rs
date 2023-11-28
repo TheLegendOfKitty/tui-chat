@@ -14,7 +14,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::{Backend, CrosstermBackend};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph,Wrap};
 use ratatui::{Frame, Terminal};
 use tui_textarea::{Input, Key, TextArea};
 
@@ -65,8 +65,8 @@ struct StatefulList<T> {
 }
 
 impl<T> StatefulList<T> {
-    fn with_items(items: Vec<T>) -> StatefulList<T> {
-        StatefulList {
+    fn with_items(items: Vec<T>) -> Self {
+        Self {
             state: ListState::default(),
             items,
         }
@@ -100,8 +100,8 @@ impl<T> StatefulList<T> {
         self.state.select(Some(i));
     }
 
-    fn current(&self) -> &T {
-        &self.items[self.state.selected().unwrap()]
+    fn current(&self) -> Option<&T> {
+        return self.items.get(self.state.selected().unwrap())
     }
 
     fn unselect(&mut self) {
@@ -183,40 +183,52 @@ mod tests {
     }
 }
 
+type ShiftBackHandler = Box<dyn FnOnce(&mut Menu, &mut State)>;
+
+struct StateCallbacks {
+    shift_back: ShiftBackHandler, //shifting away from the menu for good
+    shift_away: Box<dyn Fn(&mut Menu)>, //shifting away to another menu
+    shift_to: Box<dyn Fn(&mut Menu)> //shifting back to this menu from another menu
+}
+
 /*
             MessageInput
                  |
 MessageList <----------> ImageView
 */
 struct State<'a> {
-    stack: Vec<(Menu<'a>, Box<dyn FnOnce(&mut Menu, &mut State)>)>,
+    stack: Vec<(Menu<'a>, StateCallbacks)>,
     _cursor_visible: bool
 }
 
 impl<'a> State<'a> {
-    fn push(&mut self, m: Menu<'a>, handler: Box<dyn FnOnce(&mut Menu, &mut State)>) {
-        self.stack.push((m, handler));
+    fn push(&mut self, m: Menu<'a>, callbacks: StateCallbacks) {
+        self.stack.push((m, callbacks));
     }
 
-    fn pop(&mut self) -> Option<(Menu<'a>, Box<dyn FnOnce(&mut Menu, &mut State)>)> {
+    fn pop(&mut self) -> Option<(Menu<'a>, StateCallbacks)> {
         self.stack.pop()
     }
 
-    fn focus(&self) -> &Menu<'a> {
-        &self.stack.last().unwrap().0
+    fn focus(&self) -> &(Menu<'a>, StateCallbacks) {
+        self.stack.last().unwrap()
     }
 
-    fn _focus_mut(&mut self) -> &mut Menu<'a> {
-        &mut self.stack.last_mut().unwrap().0
+    fn focus_mut(&mut self) -> &mut(Menu<'a>, StateCallbacks) {
+        self.stack.last_mut().unwrap()
     }
 
-    fn shift_state(&mut self, menu: Menu<'a>, return_logic: impl FnOnce(&mut Menu, &mut State) + 'static) {
-        self.push(menu, Box::new(return_logic));
+    fn shift_state(&mut self, menu: Menu<'a>, callbacks: StateCallbacks) {
+        let focus = self.focus_mut();
+        (focus.1.shift_away)(&mut focus.0);
+        self.push(menu, callbacks);
     }
 
     fn shift_back(&mut self) -> Menu<'a> {
         let mut returned = self.pop().unwrap();
-        returned.1(&mut returned.0, self);
+        (returned.1.shift_back)(&mut returned.0, self);
+        let new = self.focus_mut();
+        (new.1.shift_to)(&mut new.0);
         returned.0
     }
 
@@ -378,7 +390,26 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let mut app = App { terminal: term, image: None, message_channel_receiver, picker,
             zoom_x: 35, zoom_y: 35, state: State {
-            stack: vec![(Menu::MessageInput(textarea), Box::new(|_, _| {panic!("Shifted state away from base text area!")}))],
+            stack: vec![(Menu::MessageInput(textarea), StateCallbacks {
+                shift_back: Box::new(|_, _| {panic!("Shifted state away from base text area!")}),
+                shift_away: Box::new(|menu| {
+                    if let Menu::MessageInput(area) = menu {
+                        area.set_block(Block::default()
+                            .borders(Borders::ALL)
+                            .title("Input")
+                            .style(Style::default()));
+                    }
+                }), //todo
+                shift_to: Box::new(|menu| {
+                    if let Menu::MessageInput(area) = menu {
+                        area.set_block(Block::default()
+                            .borders(Borders::ALL)
+                            .title("Input")
+                            .style(Style::default()
+                                .fg(Color::Blue)));
+                    };
+                }), //todo
+            })],
                 _cursor_visible: true
         },
             messages: Some(StatefulList::with_items(Vec::new())),
@@ -439,8 +470,8 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
 
             let current_list = List::new(
                 browser.current_dir_list.items.iter().map(|entry| {
-                        ListItem::new(entry.clone().into_os_string().into_string().unwrap()).style(Style::default().fg(Color::White).bg(Color::Black))
-                      }).collect::<Vec<ListItem>>()
+                    ListItem::new(entry.clone().into_os_string().into_string().unwrap()).style(Style::default().fg(Color::White).bg(Color::Black))
+                }).collect::<Vec<ListItem>>()
             )
                 .block(Block::default().title(browser.current_dir.to_str().unwrap()).borders(Borders::ALL))
                 .style(Style::default())
@@ -473,27 +504,27 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
 
             f.render_widget(b, top_right_section[1]);
 
-            let current_file = browser.current_dir_list.current();
+            if let Some(current_file) = browser.current_dir_list.current() {
+                let mut paragraph = Paragraph::default();
+                if current_file.is_dir() {
+                    paragraph = Paragraph::new("Directory");
+                }
+                else if current_file.is_symlink() {
+                    paragraph = Paragraph::new(format!("Symlink to {}", fs::read_link(current_file).unwrap().into_os_string().into_string().unwrap()));
+                }
+                else if current_file.is_file() {
+                    let format = FileFormat::from_file(current_file).unwrap();
 
-            let mut paragraph = Paragraph::default();
-            if current_file.is_dir() {
-                paragraph = Paragraph::new("Directory");
+                    paragraph = Paragraph::new(format.to_string());
+                    //let metadata = fs::metadata(current_file).unwrap();
+                    //metadata.file_type()
+                }
+                else {
+                    //panic!("{}", current_file.clone().into_os_string().into_string().unwrap());
+                }
+                f.render_widget(paragraph,
+                                right_section[0]);
             }
-            else if current_file.is_symlink() {
-                paragraph = Paragraph::new(format!("Symlink to {}", fs::read_link(current_file).unwrap().into_os_string().into_string().unwrap()));
-            }
-            else if current_file.is_file() {
-                let format = FileFormat::from_file(current_file).unwrap();
-
-                paragraph = Paragraph::new(format.to_string());
-                //let metadata = fs::metadata(current_file).unwrap();
-                //metadata.file_type()
-            }
-            else {
-                //panic!("{}", current_file.clone().into_os_string().into_string().unwrap());
-            }
-            f.render_widget(paragraph,
-                            right_section[0]);
         }
         None => {
             let main_layout = Layout::default()
@@ -599,7 +630,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
             f.render_widget(app_textarea.widget(), main_layout[1]);
 
             let _u = app_image.as_mut().map_or(0, |img| {
-                if *app_state.focus() == Menu::ImageView {
+                if app_state.focus().0 == Menu::ImageView {
                     let img_layout = Block::default().borders(Borders::ALL).title("Image");
                     f.render_stateful_widget(ResizeImage::new(None),
                                              img_layout.inner(centered_rect(f.size(), *app_zoom_x, *app_zoom_y)),
@@ -610,7 +641,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
             });
         }
     };
-    if let Menu::Popup(p) = app_state.focus() {
+    if let Menu::Popup(p) = &app_state.focus().0 {
         f.render_widget(Paragraph::new(p.content.deref())
                             .wrap(Wrap {trim: false})
                             .block(Block::default().title(p.title.deref()).borders(Borders::ALL)), centered_rect(f.size(), 35, 35));
@@ -656,7 +687,11 @@ fn message_recv(app_message_channel_receiver: &Receiver<Packet>, app_messages: &
                         _height: dyn_img.height(),
                         _width: dyn_img.width(),
                     });
-                    app_state.shift_state(Menu::ImageView, |_, _| {/* nothing */});
+                    app_state.shift_state(Menu::ImageView, StateCallbacks {
+                        shift_back: Box::new(|_, _| {}),
+                        shift_away: Box::new(|_| {}),
+                        shift_to: Box::new(|_| {}),
+                    });
                 }
                 MessageType::CLIENTS => {
                     let peers;
@@ -704,11 +739,11 @@ fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
 }
 
 async fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'a>) {
-    if inpt.key == Key::Char('c') && inpt.ctrl == true {
+    if inpt.key == Key::Char('c') && inpt.ctrl {
         graceful_cleanup(&mut app.terminal);
         std::process::exit(0);
     }
-    match app.state.focus() {
+    match app.state.focus().0 {
         Menu::MessageInput(_) => {
             messages_input(inpt, writer, app).await;
         }
@@ -755,41 +790,45 @@ async fn file_browser_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app
         }
         Input { key: Key::Left, .. } => {
             let current_dir = app.state.file_browser_mut().unwrap().current_dir.clone();
-            if Some(Path::new("")) == current_dir.parent() || None == current_dir.parent() {
+            if Some(Path::new("")) == current_dir.parent() || current_dir.parent().is_none() {
                 return;
             }
             else {
                 let _u = std::mem::replace(&mut app.state.file_browser_mut().unwrap().current_dir, PathBuf::from(current_dir.parent().unwrap()));
                 app.state.file_browser_mut().unwrap().current_dir_list = StatefulList::with_items(
-                    fs::read_dir(app.state.file_browser_mut().unwrap().current_dir.clone()).unwrap().into_iter().map(|entry| {
+                    fs::read_dir(app.state.file_browser_mut().unwrap().current_dir.clone()).unwrap().map(|entry| {
                         entry.unwrap().path()
                     }).collect());
                 app.state.file_browser_mut().unwrap().current_dir_list.state.select(Some(0));
             }
         }
         Input { key: Key::Right, .. } => {
-            let selected = app.state.file_browser_mut().unwrap().current_dir_list.current().clone();
+            let selected = app.state.file_browser_mut().unwrap().current_dir_list.current().unwrap().clone();
             if selected.is_dir() {
-                if let Err(_) = fs::read_dir(selected.clone().clone()) {
+                if fs::read_dir(selected.clone()).is_err() {
                     app.state.shift_state(Menu::Popup(
                         Popup {
                             title: "".to_string(),
                             content: "You don't have permission to access this directory!".to_string(),
                         }
-                    ), |_, _| {});
+                    ), StateCallbacks {
+                        shift_back: Box::new(|_, _| {}),
+                        shift_away: Box::new(|_| {}),
+                        shift_to: Box::new(|_| {}),
+                    });
                     return;
                 }
                 //let current = app.state.file_browser_mut().unwrap().current_dir.clone();
                 let _u = std::mem::replace(&mut app.state.file_browser_mut().unwrap().current_dir, selected);
                 app.state.file_browser_mut().unwrap().current_dir_list = StatefulList::with_items(
-                    fs::read_dir(app.state.file_browser_mut().unwrap().current_dir.clone()).unwrap().into_iter().map(|entry| {
+                    fs::read_dir(app.state.file_browser_mut().unwrap().current_dir.clone()).unwrap().map(|entry| {
                         entry.unwrap().path()
                     }).collect());
                 app.state.file_browser_mut().unwrap().current_dir_list.state.select(Some(0));
             }
         }
         Input { key: Key::Enter, .. } => {
-            let path = app.state.file_browser_mut().unwrap().current_dir_list.current().as_path();
+            let path = app.state.file_browser_mut().unwrap().current_dir_list.current().unwrap().as_path();
             let name : String = path.file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap();
@@ -845,7 +884,7 @@ async fn messages_list_input(inpt: Input, app: & mut App<'_>) {
             app.messages_mut().next();
         }
         _ if inpt == MESSAGE_SELECT => {
-            let packet = app.messages().current();
+            let packet = app.messages().current().unwrap();
             match &packet.message_type {
                 MessageType::STRING => {
 
@@ -860,7 +899,11 @@ async fn messages_list_input(inpt: Input, app: & mut App<'_>) {
                         _height: dyn_img.height(),
                         _width: dyn_img.width(),
                     });
-                    app.state.shift_state(Menu::ImageView, |_, _| {});
+                    app.state.shift_state(Menu::ImageView, StateCallbacks {
+                        shift_back: Box::new(|_, _| {}),
+                        shift_away: Box::new(|_| {}),
+                        shift_to: Box::new(|_| {}),
+                    });
                 }
                 MessageType::CLIENTS => {}
             }
@@ -904,25 +947,23 @@ async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &m
             match input_lines.first().unwrap().deref()
                 .split(' ').collect::<Vec<&str>>().first().unwrap().deref() {
                 "/file" => {
-                    if let Menu::MessageInput(area) = &mut app.state.stack[0].0 {
-                        area.set_block(Block::default()
-                            .borders(Borders::ALL)
-                            .title("Input")
-                            .style(Style::default()));
-                    }
                     /*let previous_menu = StatefulList::with_items(fs::read_dir(home::home_dir().unwrap()).unwrap().into_iter().map(|entry| {
                         entry.unwrap().path()
                     }).collect());*/
                     let mut current_path = home::home_dir().unwrap();
                     current_path.push("Documents");
-                    let mut current_menu = StatefulList::with_items(fs::read_dir(current_path.clone()).unwrap().into_iter().map(|entry| {
+                    let mut current_menu = StatefulList::with_items(fs::read_dir(current_path.clone()).unwrap().map(|entry| {
                         entry.unwrap().path()
                     }).collect());
                     current_menu.state.select(Some(0));
                     app.state.shift_state(Menu::FileBrowser(FileBrowser {
                         current_dir_list: current_menu,
                         current_dir: current_path,
-                    }), |_, _| {});
+                    }), StateCallbacks {
+                        shift_back: Box::new(|_, _| {}),
+                        shift_away: Box::new(|_| {}),
+                        shift_to: Box::new(|_| {}),
+                    });
                     /*let path = Path::new(input_lines[0].split(' ').collect::<Vec<&str>>()[1]);
                     let name : String = path.file_name()
                         .map(|name| name.to_string_lossy().into_owned())
@@ -964,15 +1005,11 @@ async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &m
                         .style(Style::default()));
                 }
             }
-            let message_list = std::mem::replace(&mut app.messages, None);
-            app.state.shift_state(Menu::MessageList(message_list.unwrap()), |_menu, state| {
-                if let Menu::MessageInput(area) = &mut state.stack[0].0 {
-                    area.set_block(Block::default()
-                        .borders(Borders::ALL)
-                        .title("Input")
-                        .style(Style::default()
-                            .fg(Color::Blue)));
-                };
+            let message_list = app.messages.take();
+            app.state.shift_state(Menu::MessageList(message_list.unwrap()), StateCallbacks {
+                shift_back: Box::new(|_, _| {}),
+                shift_away: Box::new(|_| {}),
+                shift_to: Box::new(|_| {}),
             });
         },
         _ if inpt == SHIFT_TO_PEERS => {
@@ -985,15 +1022,19 @@ async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &m
                         .style(Style::default()));
                 }
             }
-            let peers_list = std::mem::replace(&mut app.peers, None);
-            app.state.shift_state(Menu::PeerList(peers_list.unwrap()), |_menu, state| {
-                if let Menu::MessageInput(area) = &mut state.stack[0].0 {
-                    area.set_block(Block::default()
+            let peers_list = app.peers.take();
+            app.state.shift_state(Menu::PeerList(peers_list.unwrap()), StateCallbacks {
+                shift_to: Box::new(|_| {}),
+                shift_away: Box::new(|_| {}),
+                shift_back: Box::new(|menu, _state, | {
+                    if let Menu::MessageInput(area) = menu {
+                        area.set_block(Block::default()
                         .borders(Borders::ALL)
                         .title("Input")
                         .style(Style::default()
-                            .fg(Color::Blue)));
-                };
+                        .fg(Color::Blue)));
+                        };
+                }),
             })
         }
         input => {
