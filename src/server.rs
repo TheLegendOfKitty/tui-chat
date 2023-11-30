@@ -19,10 +19,6 @@ pub mod common;
 use crate::common::{Event, Packet, MessageType, PktSource, read_data, ReadResult, send_with_header, ClientList, Client};
 
 async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
-    panic::set_hook(Box::new(|panic_info| {
-        better_panic::Settings::auto().create_panic_handler()(panic_info);
-    }));
-
     //active clients
     let mut map = HashMap::<SocketAddr, Arc<Async<TcpStream>>>::new();
 
@@ -128,6 +124,11 @@ async fn read_messages(sender: Sender<Event>, client: Arc<Async<TcpStream>>) -> 
     }
 }
 fn main() -> Result<(), Box<dyn Error>> {
+    panic::set_hook(Box::new(|panic_info| {
+        better_panic::Settings::auto().create_panic_handler()(panic_info);
+        println!("Core dumped");
+    }));
+    coredump::register_panic_handler().unwrap();
     smol::block_on(async {
         let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 6000))?;
         println!("Listening on: {}", listener.get_ref().local_addr()?);

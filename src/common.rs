@@ -165,8 +165,11 @@ pub async fn read_data(reader: &mut BufReader<Arc<Async<TcpStream>>>) -> io::Res
                 return Ok(SUCCESS(final_buf));
             }
         }
-        Err(e) => { //todo: when is this branch taken?
-            return Err(e);
+        Err(_e) => { //todo: when is this branch taken?
+            //just drop the client
+            return Ok(DISCONNECT);
+            //previous logic
+            // return Err(e);
         }
     }
 }

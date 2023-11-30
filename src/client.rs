@@ -166,23 +166,6 @@ impl <'a> Debug for Menu<'a> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn test_menu_eq() {
-        assert_eq!(Menu::MessageInput(TextArea::default()),
-                   Menu::MessageInput(TextArea::default())
-        )
-    }
-    #[test]
-    fn test_menu_ne() {
-        assert_ne!(Menu::MessageInput(TextArea::default()),
-                   Menu::ImageView
-        )
-    }
-}
-
 type ShiftBackHandler = Box<dyn FnOnce(&mut Menu, &mut State)>;
 
 struct StateCallbacks {
@@ -347,8 +330,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     panic::set_hook(Box::new(|panic_info| {
         unexpected_cleanup();
         better_panic::Settings::auto().create_panic_handler()(panic_info);
+        println!("Core dumped");
     }));
-
+    coredump::register_panic_handler().unwrap();
 
     smol::block_on(async {
         // Open a TCP stream to the socket address
@@ -453,7 +437,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     })
 }
 
-#[allow(clippy::ptr_arg)]
 fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packet>>,
                   app_zoom_x: &u16, app_zoom_y: &u16, app_image: &mut Option<ImageWithData>, app_state: &mut State, app_peers: &mut Option<StatefulList<Client>>)
 {
@@ -673,12 +656,12 @@ fn message_recv(app_message_channel_receiver: &Receiver<Packet>, app_messages: &
         None => {}
         Some(res) => {
             let packet = res.unwrap();
-            messages.items.push(packet.clone());
-            match messages.items.last().unwrap().message_type {
+            match packet.message_type.clone() {
                 MessageType::STRING => {
-
+                    messages.items.push(packet);
                 }
                 MessageType::IMAGE(ref imgtype) => {
+                    messages.items.push(packet);
                     let dyn_img = image::load_from_memory_with_format(messages.items.last().unwrap().data.as_slice(), imgtype.format).unwrap();
                     let image = app_picker.new_state(dyn_img.clone());
                     *app_image = Option::from(ImageWithData {
@@ -832,18 +815,35 @@ async fn file_browser_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app
             let name : String = path.file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap();
-            let raw = fs::read(path).unwrap();
-            let format = image::guess_format(raw.as_slice()).unwrap();
-            //guess_format does not verify validity of the entire memory - for now, we'll load the image into memory to verify its validity
-            let _dyn_img = image::load_from_memory_with_format(raw.as_slice(), format).unwrap();
-            let packet = Packet {
-                src: PktSource::UNDEFINED,
-                message_type: MessageType::IMAGE(ImageData {
-                    format, name}),
-                data: raw,
-            };
-            send_with_header(writer, packet).await.unwrap();
-            app.state.shift_back();
+            if path.is_file() {
+                let raw = fs::read(path).unwrap();
+                if let Ok(format) = image::guess_format(raw.as_slice()) {
+                    //guess_format does not verify validity of the entire memory - for now, we'll load the image into memory to verify its validity
+                    let loaded = image::load_from_memory_with_format(raw.as_slice(), format);
+                    if let Ok(_dyn_img) = loaded {
+                        let packet = Packet {
+                            src: PktSource::UNDEFINED,
+                            message_type: MessageType::IMAGE(ImageData {
+                                format, name}),
+                            data: raw,
+                        };
+                        send_with_header(writer, packet).await.unwrap();
+                        app.state.shift_back();
+                    }
+                    else if let Err(_e) = loaded {
+                        app.state.shift_state(Menu::Popup(
+                            Popup {
+                                title: "".to_string(),
+                                content: "Invalid file format... is this not an image?".to_string(),
+                            }
+                        ), StateCallbacks {
+                            shift_back: Box::new(|_, _| {}),
+                            shift_away: Box::new(|_| {}),
+                            shift_to: Box::new(|_| {}),
+                        });
+                    }
+                }
+            }
         }
         Input { .. } => {}
     }
@@ -1045,3 +1045,19 @@ async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &m
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_menu_eq() {
+        assert_eq!(Menu::MessageInput(TextArea::default()),
+                   Menu::MessageInput(TextArea::default())
+        )
+    }
+    #[test]
+    fn test_menu_ne() {
+        assert_ne!(Menu::MessageInput(TextArea::default()),
+                   Menu::ImageView
+        )
+    }
+}

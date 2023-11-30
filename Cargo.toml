@@ -32,6 +32,7 @@ better-panic = "0.3.0"
 get-size = "0.1.4"
 home = "0.5.5"
 file-format = "0.22.0"
+coredump = "0.1.2"
 
 [patch.crates-io]
 sixel-sys-static = {path = "./sixel-sys-static-0.3.2", version = "0.3.1"}
