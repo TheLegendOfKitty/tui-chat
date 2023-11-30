@@ -29,7 +29,6 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui_image::picker::{Picker};
 use ratatui_image::protocol::{ResizeProtocol};
 use ratatui_image::ResizeImage;
-use smol::channel::{bounded, Receiver};
 use smol::io::{BufReader};
 use std::panic;
 use core::time::Duration;
@@ -240,7 +239,6 @@ impl<'a> State<'a> {
 struct App<'a> {
     terminal: Terminal<CrosstermBackend<StdoutLock<'a>>>,
     image: Option<ImageWithData>,
-    message_channel_receiver: Receiver<Packet>,
     picker: Picker,
     zoom_x: u16,
     zoom_y: u16,
@@ -333,109 +331,129 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("Core dumped");
     }));
     coredump::register_panic_handler().unwrap();
-
-    smol::block_on(async {
-        // Open a TCP stream to the socket address
-        let stream = Async::<TcpStream>::connect(SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 6000)).await.unwrap();
-
-        let stream_ref = Arc::new(stream);
-        let mut reader = BufReader::new(stream_ref.clone());
-        let mut writer = stream_ref;
-
-        let (message_channel_sender, message_channel_receiver) = bounded(100);
-
-        let stdout = io::stdout();
-        let mut stdout = stdout.lock();
-
-        //should be initialized before backend
-        #[cfg(feature = "protocol_auto")]
-        let picker = Picker::from_termios(None).unwrap();
-
-        #[cfg(feature = "protocol_halfblocks")]
-        let picker = Picker::new((10, 12), ProtocolType::Halfblocks, None).unwrap();
-
-        #[cfg(not(any(feature = "protocol_auto", feature = "protocol_halfblocks")))]
-        compile_error!("Neither protocol_auto nor protocol_halfblocks features were set!");
-
-        enable_raw_mode().unwrap();
-        crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture).unwrap();
-        let backend = CrosstermBackend::new(stdout);
-        let term = Terminal::new(backend).unwrap();
-
-        let mut textarea = TextArea::default();
-
-        textarea.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Input")
-                .style(Style::default()
-                    .fg(Color::Blue))
-        );
-
-        let mut app = App { terminal: term, image: None, message_channel_receiver, picker,
-            zoom_x: 35, zoom_y: 35, state: State {
-            stack: vec![(Menu::MessageInput(textarea), StateCallbacks {
-                shift_back: Box::new(|_, _| {panic!("Shifted state away from base text area!")}),
-                shift_away: Box::new(|menu| {
-                    if let Menu::MessageInput(area) = menu {
-                        area.set_block(Block::default()
-                            .borders(Borders::ALL)
-                            .title("Input")
-                            .style(Style::default()));
+     'restart: loop {
+            // Open a TCP stream to the socket address
+            let mut stream = None;
+            println!("Trying to connect...");
+            for _ in 0..=5 {
+                match smol::block_on(Async::<TcpStream>::connect(SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 6000))) {
+                    Ok(s) => {
+                        stream = Some(s);
+                        break;
                     }
-                }), //todo
-                shift_to: Box::new(|menu| {
-                    if let Menu::MessageInput(area) = menu {
-                        area.set_block(Block::default()
-                            .borders(Borders::ALL)
-                            .title("Input")
-                            .style(Style::default()
-                                .fg(Color::Blue)));
-                    };
-                }), //todo
-            })],
-                _cursor_visible: true
-        },
-            messages: Some(StatefulList::with_items(Vec::new())),
-            peers: Some(StatefulList::with_items(Vec::new()))
-        };
-        loop {
-            //todo: is this leaking anything?
-            match read_data(&mut reader).now_or_never() {
-                None => {}
-                Some(res) => {
-                    match res.unwrap() {
-                        ReadResult::EMPTY => {}
-                        ReadResult::DISCONNECT => {
-                            panic!("Server Disconnected!");
-                        }
-                        ReadResult::SUCCESS(bytes_read) => {
-                            let packet: Packet = postcard::from_bytes(bytes_read.as_slice()).unwrap();
-                            message_channel_sender.send(packet).await.unwrap();
-                        }
+                    Err(_) => {
+                        println!("Failed. Retrying..");
                     }
                 }
             }
 
-            message_recv(&app.message_channel_receiver, &mut app.messages, &mut app.picker, &mut app.image, &mut app.state, &mut app.peers);
+            let stream_ref = Arc::new(stream.map_or_else(|| {
+                panic!("Could not connect to server after 5 attempts!")
+            }, |v| {
+                v
+            }));
+            let mut reader = BufReader::new(stream_ref.clone());
+            let mut writer = stream_ref;
 
-            app.terminal.draw(|f| ui(f, &mut app.messages,
-                                     &app.zoom_x, &app.zoom_y, &mut app.image,&mut app.state, &mut app.peers
-            )).unwrap();
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
 
+            //should be initialized before backend
+            #[cfg(feature = "protocol_auto")]
+                let picker = Picker::from_termios(None).unwrap();
 
-            let inpt : Input = match crossterm::event::poll(POLL_TIME).unwrap() {
-                true => {
-                    crossterm::event::read().unwrap().into()
-                }
-                false => {
-                    continue;
-                }
+            #[cfg(feature = "protocol_halfblocks")]
+                let picker = Picker::new((10, 12), ProtocolType::Halfblocks, None).unwrap();
+
+            #[cfg(not(any(feature = "protocol_auto", feature = "protocol_halfblocks")))]
+            compile_error!("Neither protocol_auto nor protocol_halfblocks features were set!");
+
+            enable_raw_mode().unwrap();
+            crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture).unwrap();
+            let backend = CrosstermBackend::new(stdout);
+            let term = Terminal::new(backend).unwrap();
+
+            let mut textarea = TextArea::default();
+
+            textarea.set_block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Input")
+                    .style(Style::default()
+                        .fg(Color::Blue))
+            );
+
+            let mut app = App {
+                terminal: term,
+                image: None,
+                picker,
+                zoom_x: 35,
+                zoom_y: 35,
+                state: State {
+                    stack: vec![(Menu::MessageInput(textarea), StateCallbacks {
+                        shift_back: Box::new(|_, _| { panic!("Shifted state away from base text area!") }),
+                        shift_away: Box::new(|menu| {
+                            if let Menu::MessageInput(area) = menu {
+                                area.set_block(Block::default()
+                                    .borders(Borders::ALL)
+                                    .title("Input")
+                                    .style(Style::default()));
+                            }
+                        }),
+                        shift_to: Box::new(|menu| {
+                            if let Menu::MessageInput(area) = menu {
+                                area.set_block(Block::default()
+                                    .borders(Borders::ALL)
+                                    .title("Input")
+                                    .style(Style::default()
+                                        .fg(Color::Blue)));
+                            };
+                        }),
+                    })],
+                    _cursor_visible: true
+                },
+                messages: Some(StatefulList::with_items(Vec::new())),
+                peers: Some(StatefulList::with_items(Vec::new()))
             };
-            handle_input(inpt, &mut writer, &mut app).await;
-        }
-    })
+            loop {
+                //todo: is this leaking anything?
+                match read_data(&mut reader).now_or_never() {
+                    None => {}
+                    Some(res) => {
+                        match res.unwrap() {
+                            ReadResult::EMPTY => {}
+                            ReadResult::DISCONNECT => {
+                                continue 'restart;
+                                //panic!("Server Disconnected!");
+                            }
+                            ReadResult::SUCCESS(bytes_read) => {
+                                let packet: Packet = postcard::from_bytes(bytes_read.as_slice()).unwrap();
+                                message_recv(packet,
+                                             &mut app.messages, &mut app.picker,
+                                             &mut app.image, &mut app.state, &mut app.peers);
+                            }
+                        }
+                    }
+                }
+
+                app.terminal.draw(|f| ui(f, &mut app.messages,
+                                         &app.zoom_x, &app.zoom_y, &mut app.image, &mut app.state, &mut app.peers
+                )).unwrap();
+
+
+                let inpt: Input = match crossterm::event::poll(POLL_TIME).unwrap() {
+                    true => {
+                        crossterm::event::read().unwrap().into()
+                    }
+                    false => {
+                        continue;
+                    }
+                };
+                handle_input(inpt, &mut writer, &mut app);
+            }
+     }
 }
+
 
 fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packet>>,
                   app_zoom_x: &u16, app_zoom_y: &u16, app_image: &mut Option<ImageWithData>, app_state: &mut State, app_peers: &mut Option<StatefulList<Client>>)
@@ -632,7 +650,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
 
 }
 
-fn message_recv(app_message_channel_receiver: &Receiver<Packet>, app_messages: &mut Option<StatefulList<Packet>>,
+fn message_recv(packet: Packet, app_messages: &mut Option<StatefulList<Packet>>,
                 app_picker: &mut Picker, app_image: &mut Option<ImageWithData>,
                 app_state: &mut State, app_peers: &mut Option<StatefulList<Client>>)
 {
@@ -651,54 +669,46 @@ fn message_recv(app_message_channel_receiver: &Receiver<Packet>, app_messages: &
             messages = list
         }
     }
-
-    match app_message_channel_receiver.recv().now_or_never() {
-        None => {}
-        Some(res) => {
-            let packet = res.unwrap();
-            match packet.message_type.clone() {
-                MessageType::STRING => {
-                    messages.items.push(packet);
-                }
-                MessageType::IMAGE(ref imgtype) => {
-                    messages.items.push(packet);
-                    let dyn_img = image::load_from_memory_with_format(messages.items.last().unwrap().data.as_slice(), imgtype.format).unwrap();
-                    let image = app_picker.new_state(dyn_img.clone());
-                    *app_image = Option::from(ImageWithData {
-                        img: image,
-                        _name: imgtype.name.clone(),
-                        _height: dyn_img.height(),
-                        _width: dyn_img.width(),
-                    });
-                    app_state.shift_state(Menu::ImageView, StateCallbacks {
-                        shift_back: Box::new(|_, _| {}),
-                        shift_away: Box::new(|_| {}),
-                        shift_to: Box::new(|_| {}),
-                    });
-                }
-                MessageType::CLIENTS => {
-                    let peers;
-                    match app_peers {
-                        None => 'a : {
-                            for menu in app_state.stack.iter_mut() {
-                                if let Menu::PeerList(list) = &mut menu.0 {
-                                    peers = list;
-                                    break 'a;
-                                }
-                            }
-                            panic!("No peer list found!")
-                        }
-                        Some(list) => {
+    match packet.message_type.clone() {
+        MessageType::STRING => {
+            messages.items.push(packet);
+        }
+        MessageType::IMAGE(ref imgtype) => {
+            messages.items.push(packet);
+            let dyn_img = image::load_from_memory_with_format(messages.items.last().unwrap().data.as_slice(), imgtype.format).unwrap();
+            let image = app_picker.new_state(dyn_img.clone());
+            *app_image = Option::from(ImageWithData {
+                img: image,
+                _name: imgtype.name.clone(),
+                _height: dyn_img.height(),
+                _width: dyn_img.width(),
+            });
+            app_state.shift_state(Menu::ImageView, StateCallbacks {
+                shift_back: Box::new(|_, _| {}),
+                shift_away: Box::new(|_| {}),
+                shift_to: Box::new(|_| {}),
+            });
+        }
+        MessageType::CLIENTS => {
+            let peers;
+            match app_peers {
+                None => 'a : {
+                    for menu in app_state.stack.iter_mut() {
+                        if let Menu::PeerList(list) = &mut menu.0 {
                             peers = list;
+                            break 'a;
                         }
                     }
-                    let clients : ClientList = postcard::from_bytes(packet.data.as_slice()).unwrap();
-                    peers.items = clients.clients;
+                    panic!("No peer list found!")
+                }
+                Some(list) => {
+                    peers = list;
                 }
             }
+            let clients : ClientList = postcard::from_bytes(packet.data.as_slice()).unwrap();
+            peers.items = clients.clients;
         }
-    };
-
+    }
 }
 
 fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
@@ -721,35 +731,34 @@ fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-async fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'a>) {
+fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'a>) {
     if inpt.key == Key::Char('c') && inpt.ctrl {
         graceful_cleanup(&mut app.terminal);
         std::process::exit(0);
     }
     match app.state.focus().0 {
         Menu::MessageInput(_) => {
-            messages_input(inpt, writer, app).await;
+            messages_input(inpt, writer, app);
         }
         Menu::ImageView => {
-            images_input(inpt, &mut app.zoom_x, &mut app.zoom_y, &mut app.state).await;
+            images_input(inpt, &mut app.zoom_x, &mut app.zoom_y, &mut app.state);
         }
         Menu::MessageList(_) => {
-            messages_list_input(inpt, app).await;
+            messages_list_input(inpt, app);
         }
         Menu::PeerList(_) => {
-            peer_list_input(inpt, app).await;
+            peer_list_input(inpt, app);
         }
         Menu::FileBrowser(_) => {
-            file_browser_input(inpt, writer, app).await;
+            file_browser_input(inpt, writer, app);
         }
         Menu::Popup(_) => {
-            popup_input(inpt, app).await;
+            popup_input(inpt, app);
         }
     }
 }
 
-//todo: does this need to be async?
-async fn popup_input(inpt: Input, app: &mut App<'_>) {
+fn popup_input(inpt: Input, app: &mut App<'_>) {
     match inpt {
         _ if inpt == SHIFT_BACK => {
             app.state.shift_back();
@@ -758,8 +767,7 @@ async fn popup_input(inpt: Input, app: &mut App<'_>) {
     }
 }
 
-//todo: does this need to be async?
-async fn file_browser_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'_>) {
+fn file_browser_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'_>) {
     match inpt {
         _ if inpt == SHIFT_BACK => {
             app.state.file_browser_mut().unwrap().current_dir_list.unselect();
@@ -827,7 +835,7 @@ async fn file_browser_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app
                                 format, name}),
                             data: raw,
                         };
-                        send_with_header(writer, packet).await.unwrap();
+                        smol::block_on(send_with_header(writer, packet)).unwrap();
                         app.state.shift_back();
                     }
                     else if let Err(_e) = loaded {
@@ -850,7 +858,7 @@ async fn file_browser_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app
 }
 
 //todo: does this need to be async?
-async fn peer_list_input(inpt: Input, app: &mut App<'_>) {
+fn peer_list_input(inpt: Input, app: &mut App<'_>) {
     match inpt {
         _ if inpt == SHIFT_BACK => {
             app.peers_mut().unselect();
@@ -868,8 +876,7 @@ async fn peer_list_input(inpt: Input, app: &mut App<'_>) {
     }
 }
 
-//todo: does this need to be async?
-async fn messages_list_input(inpt: Input, app: & mut App<'_>) {
+fn messages_list_input(inpt: Input, app: & mut App<'_>) {
     match inpt {
         _ if inpt == SHIFT_BACK => {
             app.messages_mut().unselect();
@@ -912,8 +919,7 @@ async fn messages_list_input(inpt: Input, app: & mut App<'_>) {
     }
 }
 
-//todo: does this need to be async?
-async fn images_input(inpt: Input, app_zoom_x: &mut u16, app_zoom_y: &mut u16, app_state: &mut State<'_>) {
+fn images_input(inpt: Input, app_zoom_x: &mut u16, app_zoom_y: &mut u16, app_state: &mut State<'_>) {
     match inpt {
          _ if inpt == IMAGE_ZOOM_IN => {
             if *app_zoom_x < 100 && *app_zoom_y < 100 {
@@ -936,7 +942,7 @@ async fn images_input(inpt: Input, app_zoom_x: &mut u16, app_zoom_y: &mut u16, a
     }
 }
 
-async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'_>) {
+fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'_>) {
     match inpt {
         _ if inpt == SEND => 'a : {
             let input_lines = app.state.base().lines();
@@ -991,7 +997,7 @@ async fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &m
                         message_type: MessageType::STRING,
                         data: Vec::from(input_lines.join("\n"))
                     };
-                    send_with_header(writer, packet).await.unwrap();
+                    smol::block_on(send_with_header(writer, packet)).unwrap();
                 }
             }
         },
