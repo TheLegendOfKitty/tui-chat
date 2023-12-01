@@ -61,6 +61,7 @@ const POLL_TIME: Duration = Duration::from_millis(50);
 struct StatefulList<T> {
     state: ListState,
     items: Vec<T>,
+    previously_selected: Option<usize>,
 }
 
 impl<T> StatefulList<T> {
@@ -68,6 +69,7 @@ impl<T> StatefulList<T> {
         Self {
             state: ListState::default(),
             items,
+            previously_selected: None,
         }
     }
 
@@ -104,6 +106,7 @@ impl<T> StatefulList<T> {
     }
 
     fn unselect(&mut self) {
+        self.previously_selected = self.state.selected();
         self.state.select(None);
     }
 }
@@ -335,7 +338,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Open a TCP stream to the socket address
             let mut stream = None;
             println!("Trying to connect...");
-            for _ in 0..=5 {
+            for _ in 0..5 {
                 match smol::block_on(Async::<TcpStream>::connect(SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 6000))) {
                     Ok(s) => {
                         stream = Some(s);
@@ -436,7 +439,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                app.terminal.draw(|f| ui(f, &mut app.messages,
+                app.terminal.draw(|f| ui(f, &mut app.messages, &mut app.picker,
                                          &app.zoom_x, &app.zoom_y, &mut app.image, &mut app.state, &mut app.peers
                 )).unwrap();
 
@@ -455,7 +458,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 
-fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packet>>,
+fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packet>>, app_picker: &mut Picker,
                   app_zoom_x: &u16, app_zoom_y: &u16, app_image: &mut Option<ImageWithData>, app_state: &mut State, app_peers: &mut Option<StatefulList<Client>>)
 {
 
@@ -492,18 +495,36 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
                 ])
                 .split(layout[1]);
 
+            /*
             let top_right_section = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
                     Constraint::Percentage(25), Constraint::Percentage(50), Constraint::Percentage(25)
                 ])
-                .split(right_section[1]);
+                .split(right_section[1]);*/
 
-            let b = Block::default()
-                .title("          ")
-                .borders(Borders::ALL);
+            if let Some(current_file) = browser.current_dir_list.current() {
+                let name : String = current_file.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap();
+                if current_file.is_file() {
+                    let raw = fs::read(current_file).unwrap();
+                    if let Ok(format) = image::guess_format(raw.as_slice()) {
+                        //guess_format does not verify validity of the entire memory - for now, we'll load the image into memory to verify its validity
+                        let loaded = image::load_from_memory_with_format(raw.as_slice(), format);
+                        if let Ok(dyn_img) = loaded {
+                            let img_layout = Block::default().borders(Borders::ALL).title(format!("Image {}", name));
+                            f.render_stateful_widget(ResizeImage::new(None),
+                                                     img_layout.inner(right_section[1]),
+                                                     &mut app_picker.new_state(dyn_img));
+                            f.render_widget(img_layout, right_section[1]);
+                        }
+                        else if let Err(_e) = loaded {
 
-            f.render_widget(b, top_right_section[1]);
+                        }
+                    }
+                }
+            }
 
             if let Some(current_file) = browser.current_dir_list.current() {
                 let mut paragraph = Paragraph::default();
@@ -559,11 +580,23 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
             }
 
             let mut messages_vec : Vec<ListItem> = Vec::new();
-            for packet in messages.items.iter() {
+            for i in 0..messages.items.len() {
+                let packet = messages.items.get(i).unwrap();
                 match &packet.message_type {
                     MessageType::STRING => {
-                        messages_vec.push(
-                            ListItem::new(String::from_utf8(packet.data.clone()).unwrap()).style(Style::default().fg(Color::White).bg(Color::Black)));
+                        for sub_string in sub_strings(String::from_utf8(packet.data.clone()).unwrap(), top_section[0].width.into()).iter().rev() {
+                            if let Some(index) = messages.state.selected() && index == i {
+                                messages_vec.push(
+                                    ListItem::new(format!("{}\n", sub_string)).style(Style::default()
+                                                                                         .bg(Color::LightGreen)
+                                                                                         .add_modifier(Modifier::BOLD),
+                                    ));
+                            }
+                            else {
+                                messages_vec.push(
+                                    ListItem::new(format!("{}\n", sub_string)).style(Style::default().fg(Color::White).bg(Color::Black)));
+                            }
+                        }
                     }
                     MessageType::IMAGE(img) => {
                         messages_vec.push(
@@ -617,15 +650,6 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
                 .highlight_symbol(">> ");
 
             f.render_stateful_widget(peers_list, top_section[1], &mut peers.state);
-
-            /*messages_vec.push(
-                ListItem::new(
-                    format!("{:?}",
-                            app_peers.clients.iter().map(|client| {
-                                client.addr.to_string()
-                            }).collect::<Vec<String>>()
-                    )
-                ).style(Style::default().fg(Color::White).bg(Color::Black)));*/
 
             let app_textarea = if let Menu::MessageInput(x) = &mut app_state.stack[0].0 { x } else { panic!() };
             f.render_widget(app_textarea.widget(), main_layout[1]);
@@ -953,9 +977,6 @@ fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App
             match input_lines.first().unwrap().deref()
                 .split(' ').collect::<Vec<&str>>().first().unwrap().deref() {
                 "/file" => {
-                    /*let previous_menu = StatefulList::with_items(fs::read_dir(home::home_dir().unwrap()).unwrap().into_iter().map(|entry| {
-                        entry.unwrap().path()
-                    }).collect());*/
                     let mut current_path = home::home_dir().unwrap();
                     current_path.push("Documents");
                     let mut current_menu = StatefulList::with_items(fs::read_dir(current_path.clone()).unwrap().map(|entry| {
@@ -970,22 +991,6 @@ fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App
                         shift_away: Box::new(|_| {}),
                         shift_to: Box::new(|_| {}),
                     });
-                    /*let path = Path::new(input_lines[0].split(' ').collect::<Vec<&str>>()[1]);
-                    let name : String = path.file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap();
-                    let raw = fs::read(path).unwrap();
-                    let format = image::guess_format(raw.as_slice()).unwrap();
-                    //guess_format does not verify validity of the entire memory - for now, we'll load the image into memory to verify its validity
-                    let _dyn_img = image::load_from_memory_with_format(raw.as_slice(), format).unwrap();
-                    let packet = Packet {
-                        src: PktSource::UNDEFINED,
-                        message_type: MessageType::IMAGE(ImageData {
-                            format, name}),
-                        data: raw,
-                    };
-                    send_with_header(writer, packet).await.unwrap();
-                    break 'a;*/
                 }
                 "/exit" => {
                     graceful_cleanup(&mut app.terminal);
@@ -1014,8 +1019,16 @@ fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App
             let message_list = app.messages.take();
             app.state.shift_state(Menu::MessageList(message_list.unwrap()), StateCallbacks {
                 shift_back: Box::new(|_, _| {}),
-                shift_away: Box::new(|_| {}),
-                shift_to: Box::new(|_| {}),
+                shift_away: Box::new(|menu| {
+                    if let Menu::MessageList(list) = menu {
+                        list.unselect();
+                    }
+                }),
+                shift_to: Box::new(|menu| {
+                    if let Menu::MessageList(list) = menu {
+                        list.state.select(list.previously_selected);
+                    }
+                }),
             });
         },
         _ if inpt == SHIFT_TO_PEERS => {
@@ -1049,6 +1062,28 @@ fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App
             }
         }
     }
+}
+
+// Splits a string into a vector of strings to appeal to a width (used for word wrap)
+fn sub_strings(string: String, split_len: usize) -> Vec<String> {
+    let mut subs: Vec<String> = Vec::with_capacity(string.len() / split_len);
+    let mut iter = string.chars();
+    let mut pos = 0;
+
+    // Case if "" is passed
+    if string.len() == 0 {
+        return vec!["".to_string()]
+    };
+
+    while pos < string.len() {
+        let mut len = 0;
+        for ch in iter.by_ref().take(split_len) {
+            len += ch.len_utf8();
+        }
+        subs.insert(0, (&string[pos..pos + len]).to_string());
+        pos += len;
+    }
+    subs
 }
 
 #[cfg(test)]
