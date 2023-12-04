@@ -47,17 +47,17 @@ use crate::common::{MessageType, Packet, PktSource, read_data, ReadResult, send_
 
 pub mod common;
 
-const SEND: Input = Input { key: Key::Char('x'), ctrl: false, alt: false };
-const IMAGE_ZOOM_IN: Input = Input { key : Key::Char('+'), /*ctrl: true,*/ ctrl: false, alt: false };
-const IMAGE_ZOOM_OUT: Input = Input { key : Key::Char('-'), /*ctrl: true,*/ ctrl: false, alt: false };
-const _IMAGE_MOVE_LEFT: Input = Input { key: Key::Left, ctrl: false, alt: false };
-const _IMAGE_MOVE_RIGHT: Input = Input { key: Key::Right, ctrl: false, alt:false };
-const _IMAGE_MOVE_UP: Input = Input { key: Key::Up, ctrl: false, alt: false };
-const _IMAGE_MOVE_DOWN: Input = Input { key: Key::Down, ctrl: false, alt: false };
-const SHIFT_BACK: Input = Input { key: Key::Char('<'), ctrl: false, alt: false };
-const MESSAGE_SELECT: Input = Input { key: Key::Enter, ctrl: false, alt: false };
-const SHIFT_TO_PEERS: Input = Input { key: Key::Char('P'), ctrl: false, alt: false};
-const SHIFT_TO_MESSAGES_LIST : Input = Input { key: Key::Char('L'), ctrl: false, alt: false };
+const SEND: Input = Input { key: Key::Char('x'), ctrl: false, alt: false, shift: false };
+const IMAGE_ZOOM_IN: Input = Input { key : Key::Char('+'), /*ctrl: true,*/ ctrl: false, alt: false, shift: false };
+const IMAGE_ZOOM_OUT: Input = Input { key : Key::Char('-'), /*ctrl: true,*/ ctrl: false, alt: false, shift: false };
+const _IMAGE_MOVE_LEFT: Input = Input { key: Key::Left, ctrl: false, alt: false, shift: false };
+const _IMAGE_MOVE_RIGHT: Input = Input { key: Key::Right, ctrl: false, alt:false, shift: false };
+const _IMAGE_MOVE_UP: Input = Input { key: Key::Up, ctrl: false, alt: false, shift: false };
+const _IMAGE_MOVE_DOWN: Input = Input { key: Key::Down, ctrl: false, alt: false, shift: false };
+const SHIFT_BACK: Input = Input { key: Key::Char('<'), ctrl: false, alt: false, shift: false };
+const MESSAGE_SELECT: Input = Input { key: Key::Enter, ctrl: false, alt: false, shift: false };
+const SHIFT_TO_PEERS: Input = Input { key: Key::Char('P'), ctrl: false, alt: false, shift: true };
+const SHIFT_TO_MESSAGES_LIST : Input = Input { key: Key::Char('L'), ctrl: false, alt: false, shift: true };
 const POLL_TIME: Duration = Duration::from_millis(50);
 
 struct StatefulList<T> {
@@ -156,7 +156,7 @@ impl FileBrowser {
                             //guess_format does not verify validity of the entire memory - for now, we'll load the image into memory to verify its validity
                             let loaded = image::load_from_memory_with_format(raw.as_slice(), format);
                             if let Ok(dyn_img) = loaded {
-                                *current_image.lock().unwrap() = Some(picker.new_state(dyn_img));
+                                *current_image.lock().unwrap() = Some(picker.new_resize_protocol(dyn_img));
                                 continue 'exit;
                             }
                         }
@@ -414,7 +414,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             //should be initialized before backend
             #[cfg(feature = "protocol_auto")]
-                let picker = Picker::from_termios(None).unwrap();
+                let picker = Picker::from_termios().unwrap();
 
             #[cfg(feature = "protocol_halfblocks")]
                 let picker = Picker::new((10, 12), ProtocolType::Halfblocks, None).unwrap();
@@ -422,7 +422,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             #[cfg(not(any(feature = "protocol_auto", feature = "protocol_halfblocks")))]
             compile_error!("Neither protocol_auto nor protocol_halfblocks features were set!");
 
-            enable_raw_mode().unwrap();
+         enable_raw_mode().unwrap();
             crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture).unwrap();
             let backend = CrosstermBackend::new(stdout);
             let term = Terminal::new(backend).unwrap();
@@ -761,7 +761,7 @@ fn message_recv(packet: Packet, app_messages: &mut Option<StatefulList<Packet>>,
         MessageType::IMAGE(ref imgtype) => {
             messages.items.push(packet);
             let dyn_img = image::load_from_memory_with_format(messages.items.last().unwrap().data.as_slice(), imgtype.format).unwrap();
-            let image = app_picker.new_state(dyn_img.clone());
+            let image = app_picker.new_resize_protocol(dyn_img.clone());
             *app_image = Option::from(ImageWithData {
                 img: image,
                 _name: imgtype.name.clone(),
@@ -988,7 +988,7 @@ fn messages_list_input(inpt: Input, app: & mut App<'_>) {
                 MessageType::IMAGE(imagedata) => {
                     let name = imagedata.name.clone();
                     let dyn_img = image::load_from_memory_with_format(packet.data.as_slice(), imagedata.format).unwrap();
-                    let image = app.picker.new_state(dyn_img.clone());
+                    let image = app.picker.new_resize_protocol(dyn_img.clone());
                     app.image = Option::from(ImageWithData {
                         img: image,
                         _name: name,
