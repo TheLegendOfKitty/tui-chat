@@ -21,7 +21,7 @@ use tui_textarea::{Input, Key, TextArea};
 use std::net::TcpStream;
 
 use std::error::Error;
-use std::{fs, io};
+use std::{fs, io, sync, thread};
 use std::io::StdoutLock;
 use std::net::{IpAddr, SocketAddr};
 use futures_util::FutureExt;
@@ -33,9 +33,11 @@ use smol::io::{BufReader};
 use std::panic;
 use core::time::Duration;
 use std::fmt::{Debug, Formatter};
-use std::ops::{Deref};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use async_dup::Arc;
+use std::sync::mpsc::{channel, RecvError, Sender};
+use std::sync::{Mutex};
+use std::thread::{JoinHandle};
 use crossterm::execute;
 use file_format::FileFormat;
 use ratatui::style::{Color, Modifier, Style};
@@ -121,7 +123,56 @@ struct ImageWithData {
 
 struct FileBrowser {
     current_dir_list: StatefulList<PathBuf>,
-    current_dir: PathBuf
+    current_dir: PathBuf,
+    current_image: sync::Arc<Mutex<Option<Box<dyn ResizeProtocol>>>>,
+    image_thread_sender: Sender<Option<PathBuf>>, //when sender is dropped, so will the thread be
+    _image_thread: JoinHandle<()> //keep this for good measure
+}
+
+impl FileBrowser {
+    fn new(current_dir: PathBuf, picker: &Picker) -> Self {
+        let mut current_dir_list = StatefulList::with_items(fs::read_dir(current_dir.clone()).unwrap().map(|entry| {
+            entry.unwrap().path()
+        }).collect());
+        current_dir_list.state.select(Some(0));
+        let (image_thread_sender, receiver) = channel::<Option<PathBuf>>();
+        let current_image = sync::Arc::new(Mutex::new(None));
+        let struct_current_image = current_image.clone();
+        let mut picker = picker.clone();
+        let image_thread = thread::spawn(move || 'exit: loop {
+            match receiver.recv() {
+                Ok(None) | Err(RecvError) => {
+                    break 'exit;
+                }
+                Ok(Some(current_file)) => {
+                    //todo: add file name back in preview
+                    let _name : String = current_file.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap();
+                    if current_file.is_file() {
+                        let raw = fs::read(current_file).unwrap();
+                        let guess = image::guess_format(raw.as_slice());
+                        if let Ok(format) = guess {
+                            //guess_format does not verify validity of the entire memory - for now, we'll load the image into memory to verify its validity
+                            let loaded = image::load_from_memory_with_format(raw.as_slice(), format);
+                            if let Ok(dyn_img) = loaded {
+                                *current_image.lock().unwrap() = Some(picker.new_state(dyn_img));
+                                continue 'exit;
+                            }
+                        }
+                    }
+                    *current_image.lock().unwrap() = None;
+                }
+            }
+        });
+        Self {
+            current_dir_list,
+            current_dir,
+            current_image: struct_current_image,
+            image_thread_sender,
+            _image_thread: image_thread
+        }
+    }
 }
 
 struct Popup {
@@ -350,7 +401,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
 
-            let stream_ref = Arc::new(stream.map_or_else(|| {
+            let stream_ref = async_dup::Arc::new(stream.map_or_else(|| {
                 panic!("Could not connect to server after 5 attempts!")
             }, |v| {
                 v
@@ -458,7 +509,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 
-fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packet>>, app_picker: &mut Picker,
+fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packet>>,
+                  /* might need this later */ _app_picker: &mut Picker,
                   app_zoom_x: &u16, app_zoom_y: &u16, app_image: &mut Option<ImageWithData>, app_state: &mut State, app_peers: &mut Option<StatefulList<Client>>)
 {
 
@@ -503,7 +555,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
                 ])
                 .split(right_section[1]);*/
 
-            if let Some(current_file) = browser.current_dir_list.current() {
+            /*if let Some(current_file) = browser.current_dir_list.current() {
                 let name : String = current_file.file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap();
@@ -523,6 +575,15 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
 
                         }
                     }
+                }
+            }*/
+            if let Ok(mut mutex) = browser.current_image.try_lock() {
+                if let Some(img) = mutex.deref_mut() {
+                    let img_layout = Block::default().borders(Borders::ALL).title(format!("Image"));
+                    f.render_stateful_widget(ResizeImage::new(None),
+                                             img_layout.inner(right_section[1]),
+                                             img);
+                    f.render_widget(img_layout, right_section[1]);
                 }
             }
 
@@ -755,7 +816,7 @@ fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-fn handle_input<'a>(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'a>) {
+fn handle_input<'a>(inpt: Input, writer: &mut async_dup::Arc<Async<TcpStream>>, app: &mut App<'a>) {
     if inpt.key == Key::Char('c') && inpt.ctrl {
         graceful_cleanup(&mut app.terminal);
         std::process::exit(0);
@@ -791,17 +852,21 @@ fn popup_input(inpt: Input, app: &mut App<'_>) {
     }
 }
 
-fn file_browser_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'_>) {
+fn file_browser_input(inpt: Input, writer: &mut async_dup::Arc<Async<TcpStream>>, app: &mut App<'_>) {
     match inpt {
         _ if inpt == SHIFT_BACK => {
             app.state.file_browser_mut().unwrap().current_dir_list.unselect();
             app.state.shift_back();
         }
         Input { key: Key::Up, .. } => {
-            app.state.file_browser_mut().unwrap().current_dir_list.previous();
+            let browser = app.state.file_browser_mut().unwrap();
+            browser.current_dir_list.previous();
+            browser.image_thread_sender.send(Some(browser.current_dir_list.current().unwrap().clone())).unwrap();
         }
         Input { key: Key::Down, .. } => {
-            app.state.file_browser_mut().unwrap().current_dir_list.next();
+            let browser = app.state.file_browser_mut().unwrap();
+            browser.current_dir_list.next();
+            browser.image_thread_sender.send(Some(browser.current_dir_list.current().unwrap().clone())).unwrap();
         }
         Input { key: Key::Left, .. } => {
             let current_dir = app.state.file_browser_mut().unwrap().current_dir.clone();
@@ -966,7 +1031,7 @@ fn images_input(inpt: Input, app_zoom_x: &mut u16, app_zoom_y: &mut u16, app_sta
     }
 }
 
-fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App<'_>) {
+fn messages_input(inpt: Input, writer: &mut async_dup::Arc<Async<TcpStream>>, app: &mut App<'_>) {
     match inpt {
         _ if inpt == SEND => 'a : {
             let input_lines = app.state.base().lines();
@@ -977,16 +1042,9 @@ fn messages_input(inpt: Input, writer: &mut Arc<Async<TcpStream>>, app: &mut App
             match input_lines.first().unwrap().deref()
                 .split(' ').collect::<Vec<&str>>().first().unwrap().deref() {
                 "/file" => {
-                    let mut current_path = home::home_dir().unwrap();
-                    current_path.push("Documents");
-                    let mut current_menu = StatefulList::with_items(fs::read_dir(current_path.clone()).unwrap().map(|entry| {
-                        entry.unwrap().path()
-                    }).collect());
-                    current_menu.state.select(Some(0));
-                    app.state.shift_state(Menu::FileBrowser(FileBrowser {
-                        current_dir_list: current_menu,
-                        current_dir: current_path,
-                    }), StateCallbacks {
+                    let current_path = home::home_dir().unwrap();
+                    //current_path.push("Documents");
+                    app.state.shift_state(Menu::FileBrowser(FileBrowser::new(current_path, &app.picker)), StateCallbacks {
                         shift_back: Box::new(|_, _| {}),
                         shift_away: Box::new(|_| {}),
                         shift_to: Box::new(|_| {}),
