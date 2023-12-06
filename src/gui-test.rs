@@ -31,10 +31,11 @@ fn main() -> io::Result<()> {
         match crossterm::event::read()?.into() {
             Input { key: Key::Esc, .. } => break,
             Input {
-                key: Key::Enter,
-                ctrl: true,
-                ..
-            } => {}
+                key : Key::Enter,
+                ctrl : true, ..
+            } => {
+
+            }
             input => {
                 textarea.input(input);
             }

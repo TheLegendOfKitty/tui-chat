@@ -3,25 +3,26 @@
 #![warn(clippy::nursery, clippy::cargo)]
 #![allow(clippy::needless_return)]
 
-use crate::common::ReadResult::{DISCONNECT, EMPTY, SUCCESS};
-use async_dup::Arc;
-use image::ImageFormat;
-use postcard::to_allocvec;
-use serde::{Deserialize, Serialize};
-use smol::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use smol::Async;
 use std::io;
 use std::mem::size_of;
+use image::ImageFormat;
 use std::net::SocketAddr;
+use serde::{Deserialize, Serialize};
 use std::net::TcpStream;
+use async_dup::Arc;
+use postcard::to_allocvec;
+use smol::Async;
+use smol::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use crate::common::ReadResult::{DISCONNECT, EMPTY, SUCCESS};
 
 pub enum Event {
     Join(SocketAddr, Arc<Async<TcpStream>>),
     Leave(SocketAddr),
-    Message(SocketAddr, Packet),
+    Message(SocketAddr, Packet)
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 #[serde(remote = "ImageFormat")]
 #[non_exhaustive]
 pub enum ImageFormatDef {
@@ -41,58 +42,60 @@ pub enum ImageFormatDef {
     Avif,
     Qoi,
 }
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct ImageData {
     #[serde(with = "ImageFormatDef")]
     pub format: ImageFormat,
-    pub name: String,
+    pub name: String
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub enum MessageType {
     STRING,
     IMAGE(ImageData),
-    CLIENTS,
+    CLIENTS
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct Client {
-    pub addr: SocketAddr,
+    pub addr: SocketAddr
 }
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 pub struct ClientList {
-    pub clients: Vec<Client>,
+    pub clients: Vec<Client>
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub enum PktSource {
     CLIENT(SocketAddr), //set by server when messages are dispatched
-    SERVER,             //server messages, such as join/leave
-    UNDEFINED,          //client should set source as undefined
+    SERVER, //server messages, such as join/leave
+    UNDEFINED //client should set source as undefined
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct Packet {
     pub src: PktSource,
     pub message_type: MessageType,
-    pub data: Vec<u8>,
+    pub data: Vec<u8>
 }
 
 pub enum ReadResult {
     EMPTY,
     DISCONNECT,
-    SUCCESS(Vec<u8>),
+    SUCCESS(Vec<u8>)
 }
 
 /// This function should not panic or use stdout
-pub async fn send_with_header(
-    writer: &mut Arc<Async<TcpStream>>,
-    packet: Packet,
-) -> io::Result<()> {
+pub async fn send_with_header(writer: &mut Arc<Async<TcpStream>>, packet: Packet) -> io::Result<()> {
     let encoded = to_allocvec(&packet).unwrap();
     //todo: no need to multiply by size_of::<u8>?
-    let size: u32 = u32::try_from(encoded.len() * size_of::<u8>()).unwrap();
+    let size : u32 = u32::try_from(encoded.len() * size_of::<u8>()).unwrap();
     let size_bytes = size.to_be_bytes();
 
     match writer.write(&size_bytes).await {
@@ -129,9 +132,9 @@ pub async fn read_data(reader: &mut BufReader<Arc<Async<TcpStream>>>) -> io::Res
             let remaining = u32::from_be_bytes(header.try_into().unwrap());
             let read = u32::try_from(data_bytes.len()).unwrap();
             if remaining < read {
-                let final_buf: Vec<u8> = data_bytes[..usize::try_from(remaining).unwrap()].to_vec();
+                let final_buf : Vec<u8> = data_bytes[..usize::try_from(remaining).unwrap()].to_vec();
                 reader.consume(final_buf.len() + size_of::<u32>());
-                return Ok(SUCCESS(final_buf));
+                return Ok(SUCCESS(final_buf))
             }
             let remaining_size = remaining - read;
             if remaining_size != 0 {
@@ -147,21 +150,21 @@ pub async fn read_data(reader: &mut BufReader<Arc<Async<TcpStream>>>) -> io::Res
                 match res {
                     Ok(_) => {}
                     Err(_) => {
-                        return Ok(DISCONNECT); //the client is most likely disconnected
+                        return Ok(DISCONNECT) //the client is most likely disconnected
                     }
                 }
 
                 final_buf.append(&mut remaining_buf);
 
                 return Ok(SUCCESS(final_buf));
+
             }
             let final_buf = Vec::from(data_bytes);
             consumed = bytes_read.len();
             reader.consume(consumed);
             return Ok(SUCCESS(final_buf));
         }
-        Err(_e) => {
-            //todo: when is this branch taken?
+        Err(_e) => { //todo: when is this branch taken?
             //just drop the client
             return Ok(DISCONNECT);
             //previous logic

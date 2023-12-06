@@ -5,21 +5,18 @@
 #![warn(clippy::nursery, clippy::cargo)]
 #![allow(clippy::needless_return)]
 
-use async_dup::Arc;
-use smol::channel::{bounded, Receiver, Sender};
-use smol::io::BufReader;
-use smol::Async;
-use std::collections::HashMap;
+use smol::io::{BufReader};
+use std::net::{TcpListener, TcpStream};
+use smol::channel::{Receiver, Sender, bounded};
 use std::error::Error;
 use std::net::SocketAddr;
-use std::net::{TcpListener, TcpStream};
-use std::panic;
+use std::collections::HashMap;
+use std::{panic};
+use async_dup::Arc;
+use smol::Async;
 
 pub mod common;
-use crate::common::{
-    read_data, send_with_header, Client, ClientList, Event, MessageType, Packet, PktSource,
-    ReadResult,
-};
+use crate::common::{Event, Packet, MessageType, PktSource, read_data, ReadResult, send_with_header, ClientList, Client};
 
 async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
     //active clients
@@ -31,7 +28,7 @@ async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
                 map.insert(addr, stream);
 
                 let mut clients_list = ClientList {
-                    clients: Vec::new(),
+                    clients: Vec::new()
                 };
                 for key in map.keys() {
                     clients_list.clients.push(Client { addr: *key })
@@ -56,7 +53,7 @@ async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
                 map.remove(&addr);
 
                 let mut clients_list = ClientList {
-                    clients: Vec::new(),
+                    clients: Vec::new()
                 };
                 for key in map.keys() {
                     clients_list.clients.push(Client { addr: *key })
@@ -74,7 +71,7 @@ async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
                 Packet {
                     src: PktSource::SERVER,
                     message_type: MessageType::STRING,
-                    data: Vec::from(format!("{} has left", addr)),
+                    data: Vec::from(format!("{} has left", addr))
                 }
             }
             Event::Message(addr, mut packet) => {
@@ -100,27 +97,26 @@ async fn dispatch(receiver: Receiver<Event>) -> Result<(), ()> {
     Ok(())
 }
 
-async fn read_messages(
-    sender: Sender<Event>,
-    client: Arc<Async<TcpStream>>,
-) -> Result<(), Box<dyn Error>> {
+async fn read_messages(sender: Sender<Event>, client: Arc<Async<TcpStream>>) -> Result<(), Box<dyn Error>> {
     let addr = client.get_ref().peer_addr().unwrap();
-    let mut reader = BufReader::with_capacity(1024 * 1024 * 16 /* 16 mb */, client);
+    let mut reader = BufReader::with_capacity(1024 * 1024 * 16 /* 16 mb */,client);
 
-    'a: loop {
+    'a : loop {
         match read_data(&mut reader).await {
-            Ok(res) => match res {
-                ReadResult::EMPTY => {
-                    continue 'a;
+            Ok(res) => {
+                match res {
+                    ReadResult::EMPTY => {
+                        continue 'a;
+                    }
+                    ReadResult::DISCONNECT => {
+                        return Ok(());
+                    }
+                    ReadResult::SUCCESS(data) => {
+                        let packet : Packet = postcard::from_bytes( data.as_slice()).unwrap();
+                        sender.send(Event::Message(addr, packet)).await.ok();
+                    }
                 }
-                ReadResult::DISCONNECT => {
-                    return Ok(());
-                }
-                ReadResult::SUCCESS(data) => {
-                    let packet: Packet = postcard::from_bytes(data.as_slice()).unwrap();
-                    sender.send(Event::Message(addr, packet)).await.ok();
-                }
-            },
+            }
             Err(e) => {
                 panic!("{}", e);
             }
@@ -152,8 +148,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 read_messages(sender.clone(), client).await.ok();
 
                 sender.send(Event::Leave(addr)).await.ok();
-            })
-            .detach();
+            }).detach();
         }
     })
 }
