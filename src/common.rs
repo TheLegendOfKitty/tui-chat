@@ -13,7 +13,7 @@ use async_dup::Arc;
 use postcard::to_allocvec;
 use smol::Async;
 use smol::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use crate::common::ReadResult::{DISCONNECT, EMPTY, SUCCESS};
+use crate::common::ReadResult::{*};
 
 pub enum Event {
     Join(SocketAddr, Arc<Async<TcpStream>>),
@@ -59,7 +59,6 @@ pub enum MessageType {
 }
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
-#[derive(Clone)]
 pub struct Client {
     pub addr: SocketAddr
 }
@@ -159,10 +158,12 @@ pub async fn read_data(reader: &mut BufReader<Arc<Async<TcpStream>>>) -> io::Res
                 return Ok(SUCCESS(final_buf));
 
             }
-            let final_buf = Vec::from(data_bytes);
-            consumed = bytes_read.len();
-            reader.consume(consumed);
-            return Ok(SUCCESS(final_buf));
+            else {
+                let final_buf = Vec::from(data_bytes);
+                consumed = bytes_read.len();
+                reader.consume(consumed);
+                return Ok(SUCCESS(final_buf));
+            }
         }
         Err(_e) => { //todo: when is this branch taken?
             //just drop the client

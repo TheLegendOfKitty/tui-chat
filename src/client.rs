@@ -5,7 +5,6 @@
 #![warn(clippy::nursery, clippy::cargo)]
 #![allow(clippy::needless_return)]
 #![feature(let_chains)]
-#![warn(clippy::pedantic)]
 
 #[cfg(feature = "protocol_halfblocks")]
 use ratatui_image::picker::ProtocolType;
@@ -15,7 +14,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::{Backend, CrosstermBackend};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph,Wrap};
 use ratatui::{Frame, Terminal};
 use tui_textarea::{Input, Key, TextArea};
 
@@ -34,7 +33,7 @@ use smol::io::{BufReader};
 use std::panic;
 use core::time::Duration;
 use std::fmt::{Debug, Formatter};
-use std::ops::{Deref};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, RecvError, Sender};
 use std::sync::{Mutex};
@@ -65,16 +64,14 @@ struct StatefulList<T> {
     state: ListState,
     items: Vec<T>,
     previously_selected: Option<usize>,
-    title: String
 }
 
 impl<T> StatefulList<T> {
-    fn with_items(items: Vec<T>, title: String) -> Self {
+    fn with_items(items: Vec<T>) -> Self {
         Self {
             state: ListState::default(),
             items,
             previously_selected: None,
-            title
         }
     }
 
@@ -116,94 +113,6 @@ impl<T> StatefulList<T> {
     }
 }
 
-impl<'a> StatefulList<Packet> {
-    fn to_list(&self, width: usize) -> List<'a> {
-        let mut messages_vec : Vec<ListItem> = Vec::new();
-        for i in 0..self.items.len() {
-            let packet = self.items.get(i).unwrap();
-            match &packet.message_type {
-                MessageType::STRING => {
-                    for sub_string in sub_strings(String::from_utf8(packet.data.clone()).unwrap(), width).iter().rev() {
-                        if let Some(index) = self.state.selected() && index == i {
-                            messages_vec.push(
-                                ListItem::new(format!("{sub_string}\n")).style(Style::default()
-                                                                                     .bg(Color::LightGreen)
-                                                                                     .add_modifier(Modifier::BOLD),
-                                ));
-                        }
-                        else {
-                            messages_vec.push(
-                                ListItem::new(format!("{sub_string}\n")).style(Style::default().fg(Color::White).bg(Color::Black)));
-                        }
-                    }
-                }
-                MessageType::IMAGE(img) => {
-                    messages_vec.push(
-                        ListItem::new(format!("Image of type {:?}, {}", img.format, img.name)).style(Style::default().fg(Color::White).bg(Color::Black)));
-                }
-                MessageType::CLIENTS => {}
-            }
-        }
-
-        let messages_list = List::new(messages_vec)
-            .block(Block::default().title("Messages").borders(Borders::ALL)
-                .style(
-                    if self.state.selected().is_some() {
-                        Style::default()
-                    }
-                    else {
-                        Style::default().fg(Color::DarkGray)
-                    }
-                ))
-            .highlight_style(
-                Style::default()
-                    .bg(Color::LightGreen)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol(">> ");
-        messages_list
-    }
-}
-
-impl<'a> From<&Client> for ListItem<'a> {
-    fn from(value: &Client) -> Self {
-        ListItem::new(value.addr.to_string()).style(Style::default().fg(Color::White).bg(Color::Black))
-
-    }
-}
-
-impl<'a, T> From<&StatefulList<T>> for List<'a>
-where for<'b> &'b T: Into<ListItem<'a>>
-/* for more information on higher-ranked polymorphism, visit https://doc.rust-lang.org/nomicon/hrtb.html */
-{
-    fn from(value: &StatefulList<T>) -> Self {
-        let mut vec : Vec<ListItem> = Vec::new();
-        for item in &value.items {
-            vec.push(
-                <&T as Into<ListItem>>::into(item)
-            );
-        }
-
-        let list = List::new(vec)
-            .block(Block::default().title(value.title.clone()).borders(Borders::ALL)
-                .style(
-                    if value.state.selected().is_some() {
-                        Style::default()
-                    }
-                    else {
-                        Style::default().fg(Color::DarkGray)
-                    }
-                ))
-            .highlight_style(
-                Style::default()
-                    .bg(Color::LightGreen)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol(">> ");
-        list
-    }
-}
-
 #[derive(Clone)]
 struct ImageWithData {
     img: Box<dyn ResizeProtocol>,
@@ -224,12 +133,12 @@ impl FileBrowser {
     fn new(current_dir: PathBuf, picker: &Picker) -> Self {
         let mut current_dir_list = StatefulList::with_items(fs::read_dir(current_dir.clone()).unwrap().map(|entry| {
             entry.unwrap().path()
-        }).collect(), current_dir.clone().into_os_string().into_string().unwrap());
+        }).collect());
         current_dir_list.state.select(Some(0));
         let (image_thread_sender, receiver) = channel::<Option<PathBuf>>();
         let current_image = sync::Arc::new(Mutex::new(None));
         let struct_current_image = current_image.clone();
-        let mut picker = *picker;
+        let mut picker = picker.clone();
         let image_thread = thread::spawn(move || 'exit: loop {
             match receiver.recv() {
                 Ok(None) | Err(RecvError) => {
@@ -279,47 +188,6 @@ enum Menu<'a> {
     Popup(Popup)
 }
 
-/* impl<'a> Widget for Menu<'a> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        match self {
-            Menu::MessageInput(textarea) => {
-                textarea.widget().render(area, buf);
-            }
-            Menu::ImageView => {}
-            Menu::MessageList(_) => {}
-            Menu::PeerList(mut peers) => {
-                let mut peers_vec : Vec<ListItem> = Vec::new();
-                for peer in peers.items.iter() {
-                    peers_vec.push(
-                        ListItem::new(peer.addr.to_string()).style(Style::default().fg(Color::White).bg(Color::Black))
-                    );
-                }
-
-                let peers_list = List::new(peers_vec)
-                    .block(Block::default().title("Peers").borders(Borders::ALL)
-                        .style(
-                            if peers.state.selected().is_some() {
-                                Style::default()
-                            }
-                            else {
-                                Style::default().fg(Color::DarkGray)
-                            }
-                        ))
-                    .highlight_style(
-                        Style::default()
-                            .bg(Color::LightGreen)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                    .highlight_symbol(">> ");
-
-                StatefulWidget::render(peers_list, area, buf, &mut peers.state)
-            }
-            Menu::FileBrowser(_) => {}
-            Menu::Popup(_) => {}
-        }
-    }
-}*/
-
 impl<'a> PartialEq for Menu<'a> {
     fn eq(&self, other: &Self) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
@@ -351,12 +219,12 @@ impl <'a> Debug for Menu<'a> {
     }
 }
 
-type ShiftBackHandler = Box<dyn FnOnce(&mut Menu, &mut State) + 'static>;
+type ShiftBackHandler = Box<dyn FnOnce(&mut Menu, &mut State)>;
 
 struct StateCallbacks {
     shift_back: ShiftBackHandler, //shifting away from the menu for good
-    shift_away: Box<dyn Fn(&mut Menu) + 'static>, //shifting away to another menu
-    shift_to: Box<dyn Fn(&mut Menu) + 'static> //shifting back to this menu from another menu
+    shift_away: Box<dyn Fn(&mut Menu)>, //shifting away to another menu
+    shift_to: Box<dyn Fn(&mut Menu)> //shifting back to this menu from another menu
 }
 
 /*
@@ -412,7 +280,7 @@ impl<'a> State<'a> {
     }
 
     fn file_browser_mut(&mut self) -> Option<&mut FileBrowser> {
-        for menu in &mut self.stack {
+        for menu in self.stack.iter_mut() {
             if let Menu::FileBrowser(filebrowser) = &mut menu.0 {
                 return Some(filebrowser)
             }
@@ -437,7 +305,7 @@ impl<'a> App<'a> {
     fn messages_mut(&mut self) -> &mut StatefulList<Packet> {
         match &mut self.messages {
             None => {
-                for menu in &mut self.state.stack {
+                for menu in self.state.stack.iter_mut() {
                     if let Menu::MessageList(list) = &mut menu.0 {
                         return list
                     }
@@ -453,7 +321,7 @@ impl<'a> App<'a> {
     fn messages(&self) -> &StatefulList<Packet> {
         match &self.messages {
             None => {
-                for menu in &self.state.stack {
+                for menu in self.state.stack.iter() {
                     if let Menu::MessageList(list) = &menu.0 {
                         return list
                     }
@@ -469,7 +337,7 @@ impl<'a> App<'a> {
     fn peers_mut(&mut self) -> &mut StatefulList<Client> {
         match &mut self.peers {
             None => {
-                for menu in &mut self.state.stack {
+                for menu in self.state.stack.iter_mut() {
                     if let Menu::PeerList(list) = &mut menu.0 {
                         return list;
                     }
@@ -565,7 +433,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Block::default()
                     .borders(Borders::ALL)
                     .title("Input")
-                    .style(Style::default())
+                    .style(Style::default()
+                        .fg(Color::Blue))
             );
 
             let mut app = App {
@@ -582,7 +451,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 area.set_block(Block::default()
                                     .borders(Borders::ALL)
                                     .title("Input")
-                                    .style(Style::default().fg(Color::DarkGray)));
+                                    .style(Style::default()));
                             }
                         }),
                         shift_to: Box::new(|menu| {
@@ -590,20 +459,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 area.set_block(Block::default()
                                     .borders(Borders::ALL)
                                     .title("Input")
-                                    .style(Style::default()));
+                                    .style(Style::default()
+                                        .fg(Color::Blue)));
                             };
                         }),
                     })],
                     _cursor_visible: true
                 },
-                messages: Some(StatefulList::with_items(Vec::new(), String::from("Messages"))),
-                peers: Some(StatefulList::with_items(Vec::new(), String::from("Peers")))
+                messages: Some(StatefulList::with_items(Vec::new())),
+                peers: Some(StatefulList::with_items(Vec::new()))
             };
             loop {
-                app.terminal.draw(|f| ui(f, &mut app.messages,
-                                         app.zoom_x, app.zoom_y, &mut app.image, &mut app.state, &mut app.peers
-                )).unwrap();
-
                 //todo: is this leaking anything?
                 match read_data(&mut reader).now_or_never() {
                     None => {}
@@ -624,11 +490,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                let inpt: Input = if crossterm::event::poll(POLL_TIME).unwrap() {
-                    crossterm::event::read().unwrap().into()
-                }
-                else {
-                    continue;
+                app.terminal.draw(|f| ui(f, &mut app.messages, &mut app.picker,
+                                         &app.zoom_x, &app.zoom_y, &mut app.image, &mut app.state, &mut app.peers
+                )).unwrap();
+
+
+                let inpt: Input = match crossterm::event::poll(POLL_TIME).unwrap() {
+                    true => {
+                        crossterm::event::read().unwrap().into()
+                    }
+                    false => {
+                        continue;
+                    }
                 };
                 handle_input(inpt, &mut writer, &mut app);
             }
@@ -637,73 +510,106 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 
 fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packet>>,
-                  app_zoom_x: u16, app_zoom_y: u16, app_image: &mut Option<ImageWithData>, app_state: &mut State, app_peers: &mut Option<StatefulList<Client>>)
+                  /* might need this later */ _app_picker: &mut Picker,
+                  app_zoom_x: &u16, app_zoom_y: &u16, app_image: &mut Option<ImageWithData>, app_state: &mut State, app_peers: &mut Option<StatefulList<Client>>)
 {
 
-    if let Some(browser) = app_state.file_browser_mut() {
-        let layout = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(70), Constraint::Percentage(30)
-            ])
-            .split(f.size());
+    match app_state.file_browser_mut() {
+        Some(browser) => {
+            let layout = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(70), Constraint::Percentage(30)
+                ])
+                .split(f.size());
 
 
-        let current_list = List::new(
-            browser.current_dir_list.items.iter().map(|entry| {
-                ListItem::new(entry.clone().into_os_string().into_string().unwrap()).style(Style::default().fg(Color::White).bg(Color::Black))
-            }).collect::<Vec<ListItem>>()
-        )
-            .block(Block::default().title(browser.current_dir.to_str().unwrap()).borders(Borders::ALL))
-            .style(Style::default())
-            .highlight_style(
-                Style::default()
-                    .bg(Color::LightGreen)
-                    .add_modifier(Modifier::BOLD),
+            let current_list = List::new(
+                browser.current_dir_list.items.iter().map(|entry| {
+                    ListItem::new(entry.clone().into_os_string().into_string().unwrap()).style(Style::default().fg(Color::White).bg(Color::Black))
+                }).collect::<Vec<ListItem>>()
             )
-            .highlight_symbol(">> ");
+                .block(Block::default().title(browser.current_dir.to_str().unwrap()).borders(Borders::ALL))
+                .style(Style::default())
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::LightGreen)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol(">> ");
 
-        f.render_stateful_widget(current_list, layout[0], &mut browser.current_dir_list.state);
+            f.render_stateful_widget(current_list, layout[0], &mut browser.current_dir_list.state);
 
-        let right_section = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(10), Constraint::Percentage(30), Constraint::Percentage(60)
-            ])
-            .split(layout[1]);
+            let right_section = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(10), Constraint::Percentage(30), Constraint::Percentage(60)
+                ])
+                .split(layout[1]);
 
-        if let Ok(mut mutex) = browser.current_image.try_lock() {
-            if let Some(img) = &mut *mutex {
-                let img_layout = Block::default().borders(Borders::ALL).title(format!("Image {:?}", browser.current_dir_list.current().unwrap().file_name().unwrap()));
-                f.render_stateful_widget(ResizeImage::new(None),
-                                         img_layout.inner(right_section[1]),
-                                         img);
-                f.render_widget(img_layout, right_section[1]);
+            /*
+            let top_right_section = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(25), Constraint::Percentage(50), Constraint::Percentage(25)
+                ])
+                .split(right_section[1]);*/
+
+            /*if let Some(current_file) = browser.current_dir_list.current() {
+                let name : String = current_file.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap();
+                if current_file.is_file() {
+                    let raw = fs::read(current_file).unwrap();
+                    if let Ok(format) = image::guess_format(raw.as_slice()) {
+                        //guess_format does not verify validity of the entire memory - for now, we'll load the image into memory to verify its validity
+                        let loaded = image::load_from_memory_with_format(raw.as_slice(), format);
+                        if let Ok(dyn_img) = loaded {
+                            let img_layout = Block::default().borders(Borders::ALL).title(format!("Image {}", name));
+                            f.render_stateful_widget(ResizeImage::new(None),
+                                                     img_layout.inner(right_section[1]),
+                                                     &mut app_picker.new_state(dyn_img));
+                            f.render_widget(img_layout, right_section[1]);
+                        }
+                        else if let Err(_e) = loaded {
+
+                        }
+                    }
+                }
+            }*/
+            if let Ok(mut mutex) = browser.current_image.try_lock() {
+                if let Some(img) = mutex.deref_mut() {
+                    let img_layout = Block::default().borders(Borders::ALL).title(format!("Image"));
+                    f.render_stateful_widget(ResizeImage::new(None),
+                                             img_layout.inner(right_section[1]),
+                                             img);
+                    f.render_widget(img_layout, right_section[1]);
+                }
+            }
+
+            if let Some(current_file) = browser.current_dir_list.current() {
+                let mut paragraph = Paragraph::default();
+                if current_file.is_dir() {
+                    paragraph = Paragraph::new("Directory");
+                }
+                else if current_file.is_symlink() {
+                    paragraph = Paragraph::new(format!("Symlink to {}", fs::read_link(current_file).unwrap().into_os_string().into_string().unwrap()));
+                }
+                else if current_file.is_file() {
+                    let format = FileFormat::from_file(current_file).unwrap();
+
+                    paragraph = Paragraph::new(format.to_string());
+                    //let metadata = fs::metadata(current_file).unwrap();
+                    //metadata.file_type()
+                }
+                else {
+                    //panic!("{}", current_file.clone().into_os_string().into_string().unwrap());
+                }
+                f.render_widget(paragraph,
+                                right_section[0]);
             }
         }
-
-        if let Some(current_file) = browser.current_dir_list.current() {
-            let mut paragraph = Paragraph::default();
-            if current_file.is_dir() {
-                paragraph = Paragraph::new("Directory");
-            }
-            else if current_file.is_symlink() {
-                paragraph = Paragraph::new(format!("Symlink to {}", fs::read_link(current_file).unwrap().into_os_string().into_string().unwrap()));
-            }
-            else if current_file.is_file() {
-                let format = FileFormat::from_file(current_file).unwrap();
-
-                paragraph = Paragraph::new(format.to_string());
-                //let metadata = fs::metadata(current_file).unwrap();
-                //metadata.file_type()
-            }
-            else {
-                //panic!("{}", current_file.clone().into_os_string().into_string().unwrap());
-            }
-            f.render_widget(paragraph,
-                            right_section[0]);
-        }
-        else {
+        None => {
             let main_layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -721,7 +627,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
             let messages;
             match app_messages {
                 None => 'a : {
-                    for menu in &mut app_state.stack {
+                    for menu in app_state.stack.iter_mut() {
                         if let Menu::MessageList(list) = &mut menu.0 {
                             messages = list;
                             break 'a;
@@ -730,16 +636,52 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
                     panic!("No message list found!")
                 }
                 Some(list) => {
-                    messages = list;
+                    messages = list
                 }
             }
 
-            f.render_stateful_widget(messages.to_list(top_section[0].width.into()),top_section[0], &mut messages.state);
+            let mut messages_vec : Vec<ListItem> = Vec::new();
+            for i in 0..messages.items.len() {
+                let packet = messages.items.get(i).unwrap();
+                match &packet.message_type {
+                    MessageType::STRING => {
+                        for sub_string in sub_strings(String::from_utf8(packet.data.clone()).unwrap(), top_section[0].width.into()).iter().rev() {
+                            if let Some(index) = messages.state.selected() && index == i {
+                                messages_vec.push(
+                                    ListItem::new(format!("{}\n", sub_string)).style(Style::default()
+                                                                                         .bg(Color::LightGreen)
+                                                                                         .add_modifier(Modifier::BOLD),
+                                    ));
+                            }
+                            else {
+                                messages_vec.push(
+                                    ListItem::new(format!("{}\n", sub_string)).style(Style::default().fg(Color::White).bg(Color::Black)));
+                            }
+                        }
+                    }
+                    MessageType::IMAGE(img) => {
+                        messages_vec.push(
+                            ListItem::new(format!("Image of type {:?}, {}", img.format, img.name)).style(Style::default().fg(Color::White).bg(Color::Black)));
+                    }
+                    MessageType::CLIENTS => {}
+                }
+            }
+
+            let messages_list = List::new(messages_vec)
+                .block(Block::default().title("Messages").borders(Borders::ALL))
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::LightGreen)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol(">> ");
+
+            f.render_stateful_widget(messages_list,top_section[0], &mut messages.state);
 
             let peers;
             match app_peers {
                 None => 'a : {
-                    for menu in &mut app_state.stack {
+                    for menu in app_state.stack.iter_mut() {
                         if let Menu::PeerList(list) = &mut menu.0 {
                             peers = list;
                             break 'a;
@@ -752,7 +694,23 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
                 }
             }
 
-            f.render_stateful_widget::<List>(<&StatefulList<Client> as Into<List>>::into(peers), top_section[1], &mut peers.state);
+            let mut peers_vec : Vec<ListItem> = Vec::new();
+            for peer in peers.items.iter() {
+                peers_vec.push(
+                    ListItem::new(peer.addr.to_string()).style(Style::default().fg(Color::White).bg(Color::Black))
+                );
+            }
+
+            let peers_list = List::new(peers_vec)
+                .block(Block::default().title("Peers").borders(Borders::ALL))
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::LightGreen)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol(">> ");
+
+            f.render_stateful_widget(peers_list, top_section[1], &mut peers.state);
 
             let app_textarea = if let Menu::MessageInput(x) = &mut app_state.stack[0].0 { x } else { panic!() };
             f.render_widget(app_textarea.widget(), main_layout[1]);
@@ -761,18 +719,18 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_messages: &mut Option<StatefulList<Packe
                 if app_state.focus().0 == Menu::ImageView {
                     let img_layout = Block::default().borders(Borders::ALL).title("Image");
                     f.render_stateful_widget(ResizeImage::new(None),
-                                             img_layout.inner(centered_rect(f.size(), app_zoom_x, app_zoom_y)),
+                                             img_layout.inner(centered_rect(f.size(), *app_zoom_x, *app_zoom_y)),
                                              &mut img.img);
-                    f.render_widget(img_layout, centered_rect(f.size(), app_zoom_x, app_zoom_y));
+                    f.render_widget(img_layout, centered_rect(f.size(), *app_zoom_x, *app_zoom_y));
                 }
                 0
             });
         }
     };
     if let Menu::Popup(p) = &app_state.focus().0 {
-        f.render_widget(Paragraph::new(p.content.as_str())
+        f.render_widget(Paragraph::new(p.content.deref())
                             .wrap(Wrap {trim: false})
-                            .block(Block::default().title(p.title.as_str()).borders(Borders::ALL)), centered_rect(f.size(), 35, 35));
+                            .block(Block::default().title(p.title.deref()).borders(Borders::ALL)), centered_rect(f.size(), 35, 35));
     }
 
 }
@@ -784,7 +742,7 @@ fn message_recv(packet: Packet, app_messages: &mut Option<StatefulList<Packet>>,
     let messages ;
     match app_messages {
         None => 'a : {
-            for menu in &mut app_state.stack {
+            for menu in app_state.stack.iter_mut() {
                 if let Menu::MessageList(list) = &mut menu.0 {
                     messages = list;
                     break 'a;
@@ -793,7 +751,7 @@ fn message_recv(packet: Packet, app_messages: &mut Option<StatefulList<Packet>>,
             panic!("No message list found!")
         }
         Some(list) => {
-            messages = list;
+            messages = list
         }
     }
     match packet.message_type.clone() {
@@ -820,7 +778,7 @@ fn message_recv(packet: Packet, app_messages: &mut Option<StatefulList<Packet>>,
             let peers;
             match app_peers {
                 None => 'a : {
-                    for menu in &mut app_state.stack {
+                    for menu in app_state.stack.iter_mut() {
                         if let Menu::PeerList(list) = &mut menu.0 {
                             peers = list;
                             break 'a;
@@ -858,7 +816,7 @@ fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-fn handle_input(inpt: Input, writer: &mut async_dup::Arc<Async<TcpStream>>, app: &mut App<'_>) {
+fn handle_input<'a>(inpt: Input, writer: &mut async_dup::Arc<Async<TcpStream>>, app: &mut App<'a>) {
     if inpt.key == Key::Char('c') && inpt.ctrl {
         graceful_cleanup(&mut app.terminal);
         std::process::exit(0);
@@ -915,12 +873,14 @@ fn file_browser_input(inpt: Input, writer: &mut async_dup::Arc<Async<TcpStream>>
             if Some(Path::new("")) == current_dir.parent() || current_dir.parent().is_none() {
                 return;
             }
-            let _u = std::mem::replace(&mut app.state.file_browser_mut().unwrap().current_dir, PathBuf::from(current_dir.parent().unwrap()));
-            app.state.file_browser_mut().unwrap().current_dir_list = StatefulList::with_items(
-                fs::read_dir(app.state.file_browser_mut().unwrap().current_dir.clone()).unwrap().map(|entry| {
-                    entry.unwrap().path()
-                }).collect(), app.state.file_browser_mut().unwrap().current_dir.clone().into_os_string().into_string().unwrap());
-            app.state.file_browser_mut().unwrap().current_dir_list.state.select(Some(0));
+            else {
+                let _u = std::mem::replace(&mut app.state.file_browser_mut().unwrap().current_dir, PathBuf::from(current_dir.parent().unwrap()));
+                app.state.file_browser_mut().unwrap().current_dir_list = StatefulList::with_items(
+                    fs::read_dir(app.state.file_browser_mut().unwrap().current_dir.clone()).unwrap().map(|entry| {
+                        entry.unwrap().path()
+                    }).collect());
+                app.state.file_browser_mut().unwrap().current_dir_list.state.select(Some(0));
+            }
         }
         Input { key: Key::Right, .. } => {
             let selected = app.state.file_browser_mut().unwrap().current_dir_list.current().unwrap().clone();
@@ -928,7 +888,7 @@ fn file_browser_input(inpt: Input, writer: &mut async_dup::Arc<Async<TcpStream>>
                 if fs::read_dir(selected.clone()).is_err() {
                     app.state.shift_state(Menu::Popup(
                         Popup {
-                            title: String::new(),
+                            title: "".to_string(),
                             content: "You don't have permission to access this directory!".to_string(),
                         }
                     ), StateCallbacks {
@@ -943,7 +903,7 @@ fn file_browser_input(inpt: Input, writer: &mut async_dup::Arc<Async<TcpStream>>
                 app.state.file_browser_mut().unwrap().current_dir_list = StatefulList::with_items(
                     fs::read_dir(app.state.file_browser_mut().unwrap().current_dir.clone()).unwrap().map(|entry| {
                         entry.unwrap().path()
-                    }).collect(), app.state.file_browser_mut().unwrap().current_dir.clone().into_os_string().into_string().unwrap());
+                    }).collect());
                 app.state.file_browser_mut().unwrap().current_dir_list.state.select(Some(0));
             }
         }
@@ -970,7 +930,7 @@ fn file_browser_input(inpt: Input, writer: &mut async_dup::Arc<Async<TcpStream>>
                     else if let Err(_e) = loaded {
                         app.state.shift_state(Menu::Popup(
                             Popup {
-                                title: String::new(),
+                                title: "".to_string(),
                                 content: "Invalid file format... is this not an image?".to_string(),
                             }
                         ), StateCallbacks {
@@ -1146,13 +1106,13 @@ fn messages_input(inpt: Input, writer: &mut async_dup::Arc<Async<TcpStream>>, ap
                 shift_back: Box::new(|menu, _state, | {
                     if let Menu::MessageInput(area) = menu {
                         area.set_block(Block::default()
-                            .borders(Borders::ALL)
-                            .title("Input")
-                            .style(Style::default()
-                            .fg(Color::Blue)));
+                        .borders(Borders::ALL)
+                        .title("Input")
+                        .style(Style::default()
+                        .fg(Color::Blue)));
                         };
                 }),
-            });
+            })
         }
         input => {
             if let Menu::MessageInput(area) = &mut app.state.stack[0].0 {
@@ -1169,8 +1129,8 @@ fn sub_strings(string: String, split_len: usize) -> Vec<String> {
     let mut pos = 0;
 
     // Case if "" is passed
-    if string.is_empty() {
-        return vec![String::new()]
+    if string.len() == 0 {
+        return vec!["".to_string()]
     };
 
     while pos < string.len() {
@@ -1178,7 +1138,7 @@ fn sub_strings(string: String, split_len: usize) -> Vec<String> {
         for ch in iter.by_ref().take(split_len) {
             len += ch.len_utf8();
         }
-        subs.insert(0, string[pos..pos + len].to_string());
+        subs.insert(0, (&string[pos..pos + len]).to_string());
         pos += len;
     }
     subs
@@ -1191,12 +1151,12 @@ mod tests {
     fn test_menu_eq() {
         assert_eq!(Menu::MessageInput(TextArea::default()),
                    Menu::MessageInput(TextArea::default())
-        );
+        )
     }
     #[test]
     fn test_menu_ne() {
         assert_ne!(Menu::MessageInput(TextArea::default()),
                    Menu::ImageView
-        );
+        )
     }
 }
